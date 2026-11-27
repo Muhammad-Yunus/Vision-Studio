@@ -14,8 +14,103 @@ declare global {
   }
 }
 
+let resolvedCv: any = null;
+let cvReadyPromise: Promise<any> | null = null;
+let yunetModelPromise: Promise<boolean> | null = null;
+
 export function isOpenCVWasmReady(): boolean {
-  return typeof window !== 'undefined' && Boolean(window.cv && window.cv.Mat);
+  return Boolean(resolvedCv?.Mat || (typeof window !== 'undefined' && window.cv?.Mat));
+}
+
+export async function ensureOpenCVReady(): Promise<any> {
+  if (resolvedCv && resolvedCv.Mat) return resolvedCv;
+  if (typeof window !== 'undefined' && window.cv?.Mat) {
+    resolvedCv = window.cv;
+    return resolvedCv;
+  }
+  if (cvReadyPromise) return cvReadyPromise;
+
+  cvReadyPromise = (async () => {
+    if (typeof window === 'undefined') {
+      throw new Error('OpenCV.js WASM requires a browser window');
+    }
+
+    const start = Date.now();
+    while (!window.cv) {
+      if (Date.now() - start > 20000) {
+        throw new Error('Timed out waiting for /opencv/opencv.js script');
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    const raw = window.cv;
+    if (raw instanceof Promise || typeof raw.then === 'function') {
+      resolvedCv = await raw;
+      window.cv = resolvedCv;
+      return resolvedCv;
+    }
+
+    if (raw.Mat) {
+      resolvedCv = raw;
+      return resolvedCv;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Timed out waiting for OpenCV WASM runtime initialization'));
+      }, 20000);
+      const prev = raw.onRuntimeInitialized;
+      raw.onRuntimeInitialized = () => {
+        clearTimeout(timeout);
+        prev?.();
+        resolve();
+      };
+      const poll = setInterval(() => {
+        if (raw.Mat) {
+          clearInterval(poll);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 25);
+    });
+
+    resolvedCv = raw;
+    window.cv = resolvedCv;
+    return resolvedCv;
+  })();
+
+  return cvReadyPromise;
+}
+
+async function ensureYuNetModel(cv: any): Promise<boolean> {
+  if (yunetModelPromise) return yunetModelPromise;
+
+  yunetModelPromise = (async () => {
+    try {
+      const resp = await fetch('/models/face_detection_yunet_2023mar.onnx');
+      if (!resp.ok) return false;
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      try {
+        cv.FS_createDataFile('/', 'yunet.onnx', bytes, true, false, false);
+      } catch {
+        // File already exists in Emscripten virtual FS
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  return yunetModelPromise;
+}
+
+function getCv(): any {
+  const cv = resolvedCv || (typeof window !== 'undefined' ? window.cv : null);
+  if (!cv || !cv.Mat) {
+    throw new Error('OpenCV.js WASM runtime is not initialized');
+  }
+  return cv;
 }
 
 function seededRandom(seed: number): () => number {
@@ -24,6 +119,13 @@ function seededRandom(seed: number): () => number {
     s = (s * 1664525 + 1013904223) | 0;
     return ((s >>> 0) % 100000) / 100000;
   };
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const clean = hex.replace('#', '');
+  const num = parseInt(clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean, 16);
+  if (Number.isNaN(num)) return [34, 197, 94];
+  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
 }
 
 function imageDataToDataUrl(img: ImageData): string {
@@ -35,271 +137,370 @@ function imageDataToDataUrl(img: ImageData): string {
   return canvas.toDataURL('image/png');
 }
 
-function cloneImageData(img: ImageData): ImageData {
-  return new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
+function matToImageData(cv: any, mat: any): ImageData {
+  const ch = mat.channels();
+  if (ch === 4 && mat.type() === cv.CV_8UC4) {
+    return new ImageData(new Uint8ClampedArray(mat.data), mat.cols, mat.rows);
+  }
+  const rgba = new cv.Mat();
+  const u8 = new cv.Mat();
+  try {
+    let target = mat;
+    if (mat.depth() !== cv.CV_8U) {
+      mat.convertTo(u8, cv.CV_8U);
+      target = u8;
+    }
+    if (ch === 1) {
+      cv.cvtColor(target, rgba, cv.COLOR_GRAY2RGBA);
+    } else if (ch === 3) {
+      cv.cvtColor(target, rgba, cv.COLOR_RGB2RGBA);
+    } else {
+      target.copyTo(rgba);
+    }
+    return new ImageData(new Uint8ClampedArray(rgba.data), rgba.cols, rgba.rows);
+  } finally {
+    rgba.delete();
+    u8.delete();
+  }
 }
 
-function resizeImageData(src: ImageData, targetW: number, targetH: number): ImageData {
+function imageDataToRgbMat(cv: any, img: ImageData): any {
+  const rgba = cv.matFromImageData(img);
+  const rgb = new cv.Mat();
+  try {
+    cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
+    return rgb;
+  } finally {
+    rgba.delete();
+  }
+}
+
+function imageDataToGrayMat(cv: any, img: ImageData): any {
+  const rgba = cv.matFromImageData(img);
+  const gray = new cv.Mat();
+  try {
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    return gray;
+  } finally {
+    rgba.delete();
+  }
+}
+
+function cloneImageDataViaCv(cv: any, img: ImageData): ImageData {
+  const mat = cv.matFromImageData(img);
+  try {
+    return matToImageData(cv, mat);
+  } finally {
+    mat.delete();
+  }
+}
+
+function resizeImageDataViaCv(cv: any, src: ImageData, targetW: number, targetH: number): ImageData {
   if (src.width === targetW && src.height === targetH) return src;
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = src.width;
-  srcCanvas.height = src.height;
-  srcCanvas.getContext('2d')!.putImageData(src, 0, 0);
-
-  const dstCanvas = document.createElement('canvas');
-  dstCanvas.width = targetW;
-  dstCanvas.height = targetH;
-  const dstCtx = dstCanvas.getContext('2d')!;
-  dstCtx.drawImage(srcCanvas, 0, 0, targetW, targetH);
-  return dstCtx.getImageData(0, 0, targetW, targetH);
+  const mat = cv.matFromImageData(src);
+  const dst = new cv.Mat();
+  try {
+    cv.resize(mat, dst, new cv.Size(targetW, targetH), 0, 0, cv.INTER_LINEAR);
+    return matToImageData(cv, dst);
+  } finally {
+    mat.delete();
+    dst.delete();
+  }
 }
 
-function rgbToHsvPixel(r: number, g: number, b: number): [number, number, number] {
-  const rf = r / 255;
-  const gf = g / 255;
-  const bf = b / 255;
-  const max = Math.max(rf, gf, bf);
-  const min = Math.min(rf, gf, bf);
-  const d = max - min;
+// ============================================================================
+// COLOR & AUGMENTATION (100% window.cv)
+// ============================================================================
 
-  let h = 0;
-  if (d !== 0) {
-    if (max === rf) h = ((gf - bf) / d) % 6;
-    else if (max === gf) h = (bf - rf) / d + 2;
-    else h = (rf - gf) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
+function applyCLAHE(cv: any, src: ImageData, clipLimit = 2.5, tileSize = 8): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const lab = new cv.Mat();
+  const planes = new cv.MatVector();
+  const lOut = new cv.Mat();
+  const clahe = new cv.CLAHE(
+    Math.max(0.5, clipLimit),
+    new cv.Size(Math.max(2, Math.round(tileSize)), Math.max(2, Math.round(tileSize)))
+  );
+  const outRgb = new cv.Mat();
+  try {
+    cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
+    cv.split(lab, planes);
+    const lPlane = planes.get(0);
+    clahe.apply(lPlane, lOut);
+    lPlane.delete();
+    planes.set(0, lOut);
+    cv.merge(planes, lab);
+    cv.cvtColor(lab, outRgb, cv.COLOR_Lab2RGB);
+    return matToImageData(cv, outRgb);
+  } finally {
+    rgb.delete();
+    lab.delete();
+    planes.delete();
+    lOut.delete();
+    clahe.delete();
+    outRgb.delete();
   }
-  const s = max === 0 ? 0 : d / max;
-  const v = max;
-  return [Math.round((h / 360) * 255), Math.round(s * 255), Math.round(v * 255)];
 }
 
-function toGrayArray(src: ImageData): Uint8Array {
-  const gray = new Uint8Array(src.width * src.height);
-  for (let i = 0, p = 0; i < src.data.length; i += 4, p++) {
-    gray[p] = Math.round(0.299 * src.data[i] + 0.587 * src.data[i + 1] + 0.114 * src.data[i + 2]);
-  }
-  return gray;
-}
-
-function applyCLAHE(src: ImageData, clipLimit = 2.5, tileSize = 8): ImageData {
-  if (isOpenCVWasmReady()) {
-    try {
-      const cv = window.cv;
-      const mat = cv.matFromImageData(src);
-      const lab = new cv.Mat();
-      cv.cvtColor(mat, lab, cv.COLOR_RGBA2RGB);
-      const lab2 = new cv.Mat();
-      cv.cvtColor(lab, lab2, cv.COLOR_RGB2Lab);
-      const planes = new cv.MatVector();
-      cv.split(lab2, planes);
-      const clahe = new cv.CLAHE(
-        Math.max(0.5, clipLimit),
-        new cv.Size(Math.max(2, tileSize), Math.max(2, tileSize))
-      );
-      const lOut = new cv.Mat();
-      clahe.apply(planes.get(0), lOut);
-      planes.set(0, lOut);
-      cv.merge(planes, lab2);
-      cv.cvtColor(lab2, lab, cv.COLOR_Lab2RGB);
-      cv.cvtColor(lab, mat, cv.COLOR_RGB2RGBA);
-      const out = new ImageData(new Uint8ClampedArray(mat.data), mat.cols, mat.rows);
-      mat.delete();
-      lab.delete();
-      lab2.delete();
-      planes.delete();
-      clahe.delete();
-      lOut.delete();
-      return out;
-    } catch {
-      // Fallback below
-    }
-  }
-
-  const { width, height, data } = src;
-  const out = new Uint8ClampedArray(data.length);
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < data.length; i += 4) {
-    const lum = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    hist[lum]++;
-  }
-  const totalPixels = width * height;
-  const clipCount = Math.max(1, Math.round((clipLimit * totalPixels) / 256));
-  let excess = 0;
-  for (let i = 0; i < 256; i++) {
-    if (hist[i] > clipCount) {
-      excess += hist[i] - clipCount;
-      hist[i] = clipCount;
-    }
-  }
-  const addPerBin = Math.floor(excess / 256);
-  const lut = new Uint8ClampedArray(256);
-  let cdf = 0;
-  for (let i = 0; i < 256; i++) {
-    cdf += hist[i] + addPerBin;
-    lut[i] = Math.min(255, Math.round((cdf / totalPixels) * 255));
-  }
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const lum = Math.max(1, Math.round(0.299 * r + 0.587 * g + 0.114 * b));
-    const targetLum = lut[lum];
-    const ratio = targetLum / lum;
-    out[i] = Math.min(255, Math.round(r * ratio));
-    out[i + 1] = Math.min(255, Math.round(g * ratio));
-    out[i + 2] = Math.min(255, Math.round(b * ratio));
-    out[i + 3] = data[i + 3];
-  }
-  return new ImageData(out, width, height);
-}
-
-function applyEqualizeHist(src: ImageData, luminanceOnly = true): ImageData {
-  const { width, height, data } = src;
-  const total = width * height;
-  const out = new Uint8ClampedArray(data.length);
-
-  if (luminanceOnly) {
-    const hist = new Uint32Array(256);
-    for (let i = 0; i < data.length; i += 4) {
-      const lum = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-      hist[lum]++;
-    }
-    const lut = new Uint8ClampedArray(256);
-    let cdf = 0;
-    for (let i = 0; i < 256; i++) {
-      cdf += hist[i];
-      lut[i] = Math.round((cdf / total) * 255);
-    }
-    for (let i = 0; i < data.length; i += 4) {
-      const lum = Math.max(1, Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]));
-      const ratio = lut[lum] / lum;
-      out[i] = Math.min(255, Math.round(data[i] * ratio));
-      out[i + 1] = Math.min(255, Math.round(data[i + 1] * ratio));
-      out[i + 2] = Math.min(255, Math.round(data[i + 2] * ratio));
-      out[i + 3] = 255;
-    }
-  } else {
-    for (let c = 0; c < 3; c++) {
-      const hist = new Uint32Array(256);
-      for (let i = c; i < data.length; i += 4) hist[data[i]]++;
-      const lut = new Uint8ClampedArray(256);
-      let cdf = 0;
-      for (let i = 0; i < 256; i++) {
-        cdf += hist[i];
-        lut[i] = Math.round((cdf / total) * 255);
+function applyEqualizeHist(cv: any, src: ImageData, luminanceOnly = true): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const ycrcb = new cv.Mat();
+  const planes = new cv.MatVector();
+  const eq = new cv.Mat();
+  const outRgb = new cv.Mat();
+  try {
+    if (luminanceOnly) {
+      cv.cvtColor(rgb, ycrcb, cv.COLOR_RGB2YCrCb);
+      cv.split(ycrcb, planes);
+      const yPlane = planes.get(0);
+      cv.equalizeHist(yPlane, eq);
+      yPlane.delete();
+      planes.set(0, eq);
+      cv.merge(planes, ycrcb);
+      cv.cvtColor(ycrcb, outRgb, cv.COLOR_YCrCb2RGB);
+    } else {
+      cv.split(rgb, planes);
+      for (let i = 0; i < 3; i++) {
+        const ch = planes.get(i);
+        const chEq = new cv.Mat();
+        cv.equalizeHist(ch, chEq);
+        ch.delete();
+        planes.set(i, chEq);
+        chEq.delete();
       }
-      for (let i = c; i < data.length; i += 4) out[i] = lut[data[i]];
+      cv.merge(planes, outRgb);
     }
-    for (let i = 3; i < data.length; i += 4) out[i] = 255;
+    return matToImageData(cv, outRgb);
+  } finally {
+    rgb.delete();
+    ycrcb.delete();
+    planes.delete();
+    eq.delete();
+    outRgb.delete();
   }
-  return new ImageData(out, width, height);
 }
 
-function applyToHSV(src: ImageData, previewMode: string): ImageData {
-  const out = new Uint8ClampedArray(src.data.length);
-  for (let i = 0; i < src.data.length; i += 4) {
-    const [h, s, v] = rgbToHsvPixel(src.data[i], src.data[i + 1], src.data[i + 2]);
+function applyBrightnessContrast(cv: any, src: ImageData, contrast = 1.15, brightness = 15): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const dst = new cv.Mat();
+  try {
+    // OpenCV convertTo: dst(x,y) = saturate_cast(alpha * src(x,y) + beta)
+    const beta = 128 * (1 - contrast) + brightness;
+    rgb.convertTo(dst, -1, contrast, beta);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    dst.delete();
+  }
+}
+
+function applyGaussianNoise(cv: any, src: ImageData, sigma = 22, seed = 0): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const src16 = new cv.Mat();
+  const noise = new cv.Mat(src.height, src.width, cv.CV_16SC3);
+  const meanM = cv.matFromArray(1, 3, cv.CV_64F, [0, 0, 0]);
+  const stdM = cv.matFromArray(1, 3, cv.CV_64F, [sigma, sigma, sigma]);
+  const sum16 = new cv.Mat();
+  const dst = new cv.Mat();
+  try {
+    cv.setRNGSeed(Math.abs((seed | 0) + 17));
+    cv.randn(noise, meanM, stdM);
+    rgb.convertTo(src16, cv.CV_16SC3);
+    cv.add(src16, noise, sum16);
+    sum16.convertTo(dst, cv.CV_8UC3);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    src16.delete();
+    noise.delete();
+    meanM.delete();
+    stdM.delete();
+    sum16.delete();
+    dst.delete();
+  }
+}
+
+function applyRandomCropResize(cv: any, src: ImageData, scale = 0.72, seed = 0): ImageData {
+  const s = Math.min(1, Math.max(0.35, scale));
+  const rand = seededRandom(seed + 31);
+  const cw = Math.max(16, Math.round(src.width * s));
+  const ch = Math.max(16, Math.round(src.height * s));
+  const sx = Math.max(0, Math.min(src.width - cw, Math.round(rand() * (src.width - cw))));
+  const sy = Math.max(0, Math.min(src.height - ch, Math.round(rand() * (src.height - ch))));
+
+  const rgba = cv.matFromImageData(src);
+  const roi = rgba.roi(new cv.Rect(sx, sy, cw, ch));
+  const dst = new cv.Mat();
+  try {
+    cv.resize(roi, dst, new cv.Size(src.width, src.height), 0, 0, cv.INTER_LINEAR);
+    return matToImageData(cv, dst);
+  } finally {
+    rgba.delete();
+    roi.delete();
+    dst.delete();
+  }
+}
+
+function applyFlipRotate(cv: any, src: ImageData, mode = 'horizontal'): ImageData {
+  const rgba = cv.matFromImageData(src);
+  const dst = new cv.Mat();
+  const resized = new cv.Mat();
+  try {
+    if (mode === 'horizontal') {
+      cv.flip(rgba, dst, 1);
+      return matToImageData(cv, dst);
+    }
+    if (mode === 'vertical') {
+      cv.flip(rgba, dst, 0);
+      return matToImageData(cv, dst);
+    }
+    if (mode === 'rot90') {
+      cv.rotate(rgba, dst, cv.ROTATE_90_CLOCKWISE);
+      return matToImageData(cv, dst);
+    }
+    cv.rotate(rgba, dst, cv.ROTATE_180);
+    return matToImageData(cv, dst);
+  } finally {
+    rgba.delete();
+    dst.delete();
+    resized.delete();
+  }
+}
+
+function applyChannelShuffle(cv: any, src: ImageData, orderStr = 'bgr'): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const planes = new cv.MatVector();
+  const reordered = new cv.MatVector();
+  const dst = new cv.Mat();
+  const mapIdx =
+    orderStr === 'grb'
+      ? [1, 0, 2]
+      : orderStr === 'brg'
+        ? [2, 0, 1]
+        : orderStr === 'rbg'
+          ? [0, 2, 1]
+          : [2, 1, 0];
+  try {
+    cv.split(rgb, planes);
+    const chs = [planes.get(0), planes.get(1), planes.get(2)];
+    reordered.push_back(chs[mapIdx[0]]);
+    reordered.push_back(chs[mapIdx[1]]);
+    reordered.push_back(chs[mapIdx[2]]);
+    cv.merge(reordered, dst);
+    chs.forEach((c) => c.delete());
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    planes.delete();
+    reordered.delete();
+    dst.delete();
+  }
+}
+
+function applyToHSV(cv: any, src: ImageData, previewMode = 'hsv_channels'): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const hsv = new cv.Mat();
+  const planes = new cv.MatVector();
+  try {
+    cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
     if (previewMode === 'hue_only') {
-      out[i] = h;
-      out[i + 1] = h;
-      out[i + 2] = h;
-    } else if (previewMode === 'sat_only') {
-      out[i] = s;
-      out[i + 1] = s;
-      out[i + 2] = s;
-    } else {
-      out[i] = h;
-      out[i + 1] = s;
-      out[i + 2] = v;
+      cv.split(hsv, planes);
+      const h = planes.get(0);
+      const hScaled = new cv.Mat();
+      h.convertTo(hScaled, -1, 255 / 180, 0);
+      const img = matToImageData(cv, hScaled);
+      h.delete();
+      hScaled.delete();
+      return img;
     }
-    out[i + 3] = 255;
-  }
-  return new ImageData(out, src.width, src.height);
-}
-
-function applyToLAB(src: ImageData, channelView = 'composite'): ImageData {
-  const out = new Uint8ClampedArray(src.data.length);
-  for (let i = 0; i < src.data.length; i += 4) {
-    const r = src.data[i] / 255;
-    const g = src.data[i + 1] / 255;
-    const b = src.data[i + 2] / 255;
-    // Fast sRGB -> XYZ -> Lab approximation
-    const x = 0.412453 * r + 0.35758 * g + 0.180423 * b;
-    const y = 0.212671 * r + 0.71516 * g + 0.072169 * b;
-    const z = 0.019334 * r + 0.119193 * g + 0.950227 * b;
-    const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
-    const fx = f(x / 0.950456);
-    const fy = f(y);
-    const fz = f(z / 1.088754);
-    const L = Math.min(255, Math.max(0, Math.round(((116 * fy - 16) / 100) * 255)));
-    const A = Math.min(255, Math.max(0, Math.round(128 + 500 * (fx - fy) * 0.5)));
-    const B = Math.min(255, Math.max(0, Math.round(128 + 200 * (fy - fz) * 0.5)));
-
-    if (channelView === 'l_channel') {
-      out[i] = out[i + 1] = out[i + 2] = L;
-    } else if (channelView === 'a_channel') {
-      out[i] = out[i + 1] = out[i + 2] = A;
-    } else if (channelView === 'b_channel') {
-      out[i] = out[i + 1] = out[i + 2] = B;
-    } else {
-      out[i] = L;
-      out[i + 1] = A;
-      out[i + 2] = B;
+    if (previewMode === 'sat_only') {
+      cv.split(hsv, planes);
+      const s = planes.get(1);
+      const img = matToImageData(cv, s);
+      s.delete();
+      return img;
     }
-    out[i + 3] = 255;
+    return matToImageData(cv, hsv);
+  } finally {
+    rgb.delete();
+    hsv.delete();
+    planes.delete();
   }
-  return new ImageData(out, src.width, src.height);
 }
 
-function sampleColorMap(t: number, palette: string): [number, number, number] {
-  const clamp = (v: number) => Math.min(255, Math.max(0, Math.round(v * 255)));
-  if (palette === 'jet') {
-    const r = Math.min(Math.max(1.5 - Math.abs(4 * t - 3), 0), 1);
-    const g = Math.min(Math.max(1.5 - Math.abs(4 * t - 2), 0), 1);
-    const b = Math.min(Math.max(1.5 - Math.abs(4 * t - 1), 0), 1);
-    return [clamp(r), clamp(g), clamp(b)];
+function applyToLAB(cv: any, src: ImageData, channelView = 'composite'): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const lab = new cv.Mat();
+  const planes = new cv.MatVector();
+  try {
+    cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
+    if (channelView === 'l_channel' || channelView === 'a_channel' || channelView === 'b_channel') {
+      cv.split(lab, planes);
+      const idx = channelView === 'l_channel' ? 0 : channelView === 'a_channel' ? 1 : 2;
+      const ch = planes.get(idx);
+      const img = matToImageData(cv, ch);
+      ch.delete();
+      return img;
+    }
+    return matToImageData(cv, lab);
+  } finally {
+    rgb.delete();
+    lab.delete();
+    planes.delete();
   }
-  if (palette === 'hot') {
-    const r = Math.min(1, t * 2.5);
-    const g = Math.min(1, Math.max(0, (t - 0.35) * 2.4));
-    const b = Math.min(1, Math.max(0, (t - 0.72) * 3.5));
-    return [clamp(r), clamp(g), clamp(b)];
-  }
-  if (palette === 'inferno') {
-    const r = Math.min(1, Math.pow(t, 0.65) * 1.15);
-    const g = Math.min(1, Math.pow(Math.max(0, t - 0.25), 1.2) * 1.4);
-    const b = Math.min(1, Math.sin(t * Math.PI) * 0.7 + (t > 0.75 ? (t - 0.75) * 4 : 0));
-    return [clamp(r), clamp(g), clamp(b)];
-  }
-  if (palette === 'viridis') {
-    const r = Math.max(0, Math.min(1, -0.35 + 1.4 * t * t));
-    const g = Math.max(0, Math.min(1, 0.1 + 0.85 * t));
-    const b = Math.max(0, Math.min(1, 0.35 + 0.65 * Math.sin(t * 3.14)));
-    return [clamp(r), clamp(g), clamp(b)];
-  }
-  // Turbo-inspired rainbow perceptual map
-  const r = Math.max(0, Math.min(1, 0.13 + Math.sin((t - 0.28) * 4.2) * 0.85));
-  const g = Math.max(0, Math.min(1, Math.sin(t * Math.PI) * 0.98));
-  const b = Math.max(0, Math.min(1, 0.22 + Math.cos(t * 3.7) * 0.75));
-  return [clamp(r), clamp(g), clamp(b)];
 }
 
-function applyColorMap(src: ImageData, palette = 'turbo'): ImageData {
-  const gray = toGrayArray(src);
-  const out = new Uint8ClampedArray(src.data.length);
-  for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-    const [r, g, b] = sampleColorMap(gray[p] / 255, palette);
-    out[i] = r;
-    out[i + 1] = g;
-    out[i + 2] = b;
-    out[i + 3] = 255;
+function applyColorMap(cv: any, src: ImageData, palette = 'turbo'): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const cmBgr = new cv.Mat();
+  const rgbaOut = new cv.Mat();
+  const mapCode =
+    palette === 'jet'
+      ? cv.COLORMAP_JET
+      : palette === 'hot'
+        ? cv.COLORMAP_HOT
+        : palette === 'inferno'
+          ? cv.COLORMAP_INFERNO
+          : palette === 'viridis'
+            ? cv.COLORMAP_VIRIDIS
+            : cv.COLORMAP_TURBO;
+  try {
+    cv.applyColorMap(gray, cmBgr, mapCode);
+    cv.cvtColor(cmBgr, rgbaOut, cv.COLOR_BGR2RGBA);
+    return matToImageData(cv, rgbaOut);
+  } finally {
+    gray.delete();
+    cmBgr.delete();
+    rgbaOut.delete();
   }
-  return new ImageData(out, src.width, src.height);
 }
 
-function applyInRange(src: ImageData, params: Record<string, unknown>): ImageData {
+function applySplitChannel(cv: any, src: ImageData, channel = 'r'): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const planes = new cv.MatVector();
+  try {
+    cv.split(rgb, planes);
+    const idx = channel === 'g' ? 1 : channel === 'b' ? 2 : 0;
+    const plane = planes.get(idx);
+    const img = matToImageData(cv, plane);
+    plane.delete();
+    return img;
+  } finally {
+    rgb.delete();
+    planes.delete();
+  }
+}
+
+function applyToGrayscale(cv: any, src: ImageData): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  try {
+    return matToImageData(cv, gray);
+  } finally {
+    gray.delete();
+  }
+}
+
+function applyInRange(cv: any, src: ImageData, params: Record<string, unknown>): ImageData {
   const lH = Number(params.lowerH ?? 0);
   const uH = Number(params.upperH ?? 180);
   const lS = Number(params.lowerS ?? 40);
@@ -307,280 +508,312 @@ function applyInRange(src: ImageData, params: Record<string, unknown>): ImageDat
   const lV = Number(params.lowerV ?? 40);
   const uV = Number(params.upperV ?? 255);
 
-  const out = new Uint8ClampedArray(src.data.length);
-  for (let i = 0; i < src.data.length; i += 4) {
-    const c1 = src.data[i];
-    const c2 = src.data[i + 1];
-    const c3 = src.data[i + 2];
-    const match = c1 >= lH && c1 <= uH && c2 >= lS && c2 <= uS && c3 >= lV && c3 <= uV;
-    const val = match ? 255 : 0;
-    out[i] = val;
-    out[i + 1] = val;
-    out[i + 2] = val;
-    out[i + 3] = 255;
+  const rgb = imageDataToRgbMat(cv, src);
+  const low = new cv.Mat(rgb.rows, rgb.cols, rgb.type(), new cv.Scalar(lH, lS, lV));
+  const high = new cv.Mat(rgb.rows, rgb.cols, rgb.type(), new cv.Scalar(uH, uS, uV));
+  const mask = new cv.Mat();
+  try {
+    cv.inRange(rgb, low, high, mask);
+    return matToImageData(cv, mask);
+  } finally {
+    rgb.delete();
+    low.delete();
+    high.delete();
+    mask.delete();
   }
-  return new ImageData(out, src.width, src.height);
 }
 
-function applyGaussianBlur(src: ImageData, kernelSize = 5): ImageData {
+// ============================================================================
+// FILTERS (100% window.cv)
+// ============================================================================
+
+function applyGaussianBlur(cv: any, src: ImageData, kernelSize = 5, sigmaX = 1.4): ImageData {
   const k = Math.max(1, Math.round(kernelSize) | 1);
-  if (k <= 1) return cloneImageData(src);
-  const canvas = document.createElement('canvas');
-  canvas.width = src.width;
-  canvas.height = src.height;
-  const ctx = canvas.getContext('2d')!;
-  const tmp = document.createElement('canvas');
-  tmp.width = src.width;
-  tmp.height = src.height;
-  tmp.getContext('2d')!.putImageData(src, 0, 0);
-  ctx.filter = `blur(${Math.max(0.5, (k - 1) * 0.45)}px)`;
-  ctx.drawImage(tmp, 0, 0);
-  return ctx.getImageData(0, 0, src.width, src.height);
+  const rgb = imageDataToRgbMat(cv, src);
+  const dst = new cv.Mat();
+  try {
+    cv.GaussianBlur(rgb, dst, new cv.Size(k, k), sigmaX, 0, cv.BORDER_DEFAULT);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    dst.delete();
+  }
 }
 
-function applyMedianBlur(src: ImageData, kernelSize = 5): ImageData {
-  const { width, height, data } = src;
-  const r = Math.max(1, Math.min(4, Math.floor(kernelSize / 2)));
-  const out = new Uint8ClampedArray(data.length);
-  const winR: number[] = [];
-  const winG: number[] = [];
-  const winB: number[] = [];
+function applyMedianBlur(cv: any, src: ImageData, kernelSize = 5): ImageData {
+  const k = Math.max(3, Math.round(kernelSize) | 1);
+  const rgb = imageDataToRgbMat(cv, src);
+  const dst = new cv.Mat();
+  try {
+    cv.medianBlur(rgb, dst, k);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    dst.delete();
+  }
+}
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      winR.length = 0;
-      winG.length = 0;
-      winB.length = 0;
-      for (let dy = -r; dy <= r; dy++) {
-        const ny = Math.min(height - 1, Math.max(0, y + dy));
-        for (let dx = -r; dx <= r; dx++) {
-          const nx = Math.min(width - 1, Math.max(0, x + dx));
-          const idx = (ny * width + nx) * 4;
-          winR.push(data[idx]);
-          winG.push(data[idx + 1]);
-          winB.push(data[idx + 2]);
-        }
+function applyBilateralFilter(
+  cv: any,
+  src: ImageData,
+  diameter = 7,
+  sigmaColor = 55,
+  sigmaSpace = 35
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const dst = new cv.Mat();
+  try {
+    cv.bilateralFilter(rgb, dst, Math.max(3, Math.round(diameter)), sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    dst.delete();
+  }
+}
+
+function applyBoxBlur(cv: any, src: ImageData, kernelSize = 5): ImageData {
+  const k = Math.max(1, Math.round(kernelSize));
+  const rgb = imageDataToRgbMat(cv, src);
+  const dst = new cv.Mat();
+  try {
+    cv.blur(rgb, dst, new cv.Size(k, k), new cv.Point(-1, -1), cv.BORDER_DEFAULT);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    dst.delete();
+  }
+}
+
+function applySobel(cv: any, src: ImageData, axis = 'xy', gain = 1.0): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const gx = new cv.Mat();
+  const gy = new cv.Mat();
+  const ax = new cv.Mat();
+  const ay = new cv.Mat();
+  const out = new cv.Mat();
+  try {
+    if (axis === 'x') {
+      cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3, 1, 0, cv.BORDER_DEFAULT);
+      cv.convertScaleAbs(gx, out, gain, 0);
+    } else if (axis === 'y') {
+      cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3, 1, 0, cv.BORDER_DEFAULT);
+      cv.convertScaleAbs(gy, out, gain, 0);
+    } else {
+      cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3, 1, 0, cv.BORDER_DEFAULT);
+      cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3, 1, 0, cv.BORDER_DEFAULT);
+      cv.convertScaleAbs(gx, ax, gain, 0);
+      cv.convertScaleAbs(gy, ay, gain, 0);
+      cv.addWeighted(ax, 0.5, ay, 0.5, 0, out);
+    }
+    return matToImageData(cv, out);
+  } finally {
+    gray.delete();
+    gx.delete();
+    gy.delete();
+    ax.delete();
+    ay.delete();
+    out.delete();
+  }
+}
+
+function applyLaplacian(cv: any, src: ImageData, gain = 1.5): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const lap = new cv.Mat();
+  const absLap = new cv.Mat();
+  try {
+    cv.Laplacian(gray, lap, cv.CV_16S, 3, 1, 0, cv.BORDER_DEFAULT);
+    cv.convertScaleAbs(lap, absLap, gain, 0);
+    return matToImageData(cv, absLap);
+  } finally {
+    gray.delete();
+    lap.delete();
+    absLap.delete();
+  }
+}
+
+function applyCanny(cv: any, src: ImageData, t1 = 60, t2 = 150): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const edges = new cv.Mat();
+  try {
+    cv.Canny(gray, edges, Math.min(t1, t2), Math.max(t1, t2), 3, false);
+    return matToImageData(cv, edges);
+  } finally {
+    gray.delete();
+    edges.delete();
+  }
+}
+
+function applySharpen(cv: any, src: ImageData, strength = 1.2): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const blurred = new cv.Mat();
+  const dst = new cv.Mat();
+  try {
+    cv.GaussianBlur(rgb, blurred, new cv.Size(5, 5), 1.4, 0, cv.BORDER_DEFAULT);
+    cv.addWeighted(rgb, 1 + strength, blurred, -strength, 0, dst);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    blurred.delete();
+    dst.delete();
+  }
+}
+
+// ============================================================================
+// ANALYSIS (100% window.cv)
+// ============================================================================
+
+function applyDrawHistogram(cv: any, src: ImageData, mode = 'channels', plotW = 512, plotH = 256): ImageData {
+  const w = Math.max(128, Math.min(512, Math.round(plotW)));
+  const h = Math.max(128, Math.min(512, Math.round(plotH)));
+  const rgb = imageDataToRgbMat(cv, src);
+  const converted = new cv.Mat();
+  const planes = new cv.MatVector();
+  const canvas = new cv.Mat(h, w, cv.CV_8UC4, new cv.Scalar(0, 0, 0, 0));
+  const emptyMask = new cv.Mat();
+
+  const renderHistSeries = (
+    planeMat: any,
+    fillRgba: [number, number, number, number],
+    strokeRgba: [number, number, number, number],
+    maxBinScale: number
+  ) => {
+    const mv = new cv.MatVector();
+    const hist = new cv.Mat();
+    const coords = new Int32Array((256 + 2) * 2);
+    mv.push_back(planeMat);
+    cv.calcHist(mv, [0], emptyMask, hist, [256], [0, 256], false);
+
+    const data = hist.data32F;
+    coords[0] = 0;
+    coords[1] = h - 1;
+    for (let bin = 0; bin < 256; bin++) {
+      const px = Math.round((bin / 255) * (w - 1));
+      const norm = Math.min(1, data[bin] / Math.max(1, maxBinScale));
+      const py = Math.max(2, Math.round(h - 1 - norm * (h * 0.88)));
+      coords[(bin + 1) * 2] = px;
+      coords[(bin + 1) * 2 + 1] = py;
+    }
+    coords[(256 + 1) * 2] = w - 1;
+    coords[(256 + 1) * 2 + 1] = h - 1;
+
+    const polyMat = cv.matFromArray(258, 1, cv.CV_32SC2, coords);
+    const pv = new cv.MatVector();
+    pv.push_back(polyMat);
+
+    const layer = new cv.Mat(h, w, cv.CV_8UC4, new cv.Scalar(0, 0, 0, 0));
+    cv.fillPoly(layer, pv, new cv.Scalar(...fillRgba));
+    cv.polylines(layer, pv, false, new cv.Scalar(...strokeRgba), 2, cv.LINE_AA);
+    cv.addWeighted(canvas, 1.0, layer, 0.72, 0, canvas);
+
+    mv.delete();
+    hist.delete();
+    polyMat.delete();
+    pv.delete();
+    layer.delete();
+  };
+
+  try {
+    if (mode === 'luminance') {
+      cv.cvtColor(rgb, converted, cv.COLOR_RGB2GRAY);
+      const mv = new cv.MatVector();
+      const hist = new cv.Mat();
+      mv.push_back(converted);
+      cv.calcHist(mv, [0], emptyMask, hist, [256], [0, 256], false);
+      const mm = cv.minMaxLoc(hist);
+      mv.delete();
+      hist.delete();
+      renderHistSeries(converted, [226, 232, 240, 200], [248, 250, 252, 255], mm.maxVal);
+    } else {
+      if (mode === 'hsv') {
+        cv.cvtColor(rgb, converted, cv.COLOR_RGB2HSV);
+        cv.split(converted, planes);
+      } else {
+        cv.split(rgb, planes);
       }
-      winR.sort((a, b) => a - b);
-      winG.sort((a, b) => a - b);
-      winB.sort((a, b) => a - b);
-      const mid = winR.length >> 1;
-      const oIdx = (y * width + x) * 4;
-      out[oIdx] = winR[mid];
-      out[oIdx + 1] = winG[mid];
-      out[oIdx + 2] = winB[mid];
-      out[oIdx + 3] = 255;
-    }
-  }
-  return new ImageData(out, width, height);
-}
-
-function applyBilateralFilter(src: ImageData, diameter = 7, sigmaColor = 55, sigmaSpace = 35): ImageData {
-  const { width, height, data } = src;
-  const r = Math.max(1, Math.min(5, Math.floor(diameter / 2)));
-  const out = new Uint8ClampedArray(data.length);
-  const twoSigmaC2 = 2 * sigmaColor * sigmaColor;
-  const twoSigmaS2 = 2 * sigmaSpace * sigmaSpace;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const cIdx = (y * width + x) * 4;
-      const cr = data[cIdx];
-      const cg = data[cIdx + 1];
-      const cb = data[cIdx + 2];
-      let sumW = 0;
-      let sumR = 0;
-      let sumG = 0;
-      let sumB = 0;
-
-      for (let dy = -r; dy <= r; dy++) {
-        const ny = Math.min(height - 1, Math.max(0, y + dy));
-        for (let dx = -r; dx <= r; dx++) {
-          const nx = Math.min(width - 1, Math.max(0, x + dx));
-          const nIdx = (ny * width + nx) * 4;
-          const dr = data[nIdx] - cr;
-          const dg = data[nIdx + 1] - cg;
-          const db = data[nIdx + 2] - cb;
-          const colorDist2 = dr * dr + dg * dg + db * db;
-          const spaceDist2 = dx * dx + dy * dy;
-          const w = Math.exp(-colorDist2 / twoSigmaC2 - spaceDist2 / twoSigmaS2);
-          sumW += w;
-          sumR += data[nIdx] * w;
-          sumG += data[nIdx + 1] * w;
-          sumB += data[nIdx + 2] * w;
+      const chs = [planes.get(0), planes.get(1), planes.get(2)];
+      let globalMax = 1;
+      for (const ch of chs) {
+        const mv = new cv.MatVector();
+        const hist = new cv.Mat();
+        mv.push_back(ch);
+        cv.calcHist(mv, [0], emptyMask, hist, [256], [0, 256], false);
+        for (let b = 2; b < 254; b++) {
+          if (hist.data32F[b] > globalMax) globalMax = hist.data32F[b];
         }
+        mv.delete();
+        hist.delete();
       }
-      out[cIdx] = Math.round(sumR / sumW);
-      out[cIdx + 1] = Math.round(sumG / sumW);
-      out[cIdx + 2] = Math.round(sumB / sumW);
-      out[cIdx + 3] = 255;
+      renderHistSeries(chs[2], [59, 130, 246, 220], [96, 165, 250, 255], globalMax);
+      renderHistSeries(chs[1], [34, 197, 94, 210], [74, 222, 128, 255], globalMax);
+      renderHistSeries(chs[0], [239, 68, 68, 210], [248, 113, 113, 255], globalMax);
+      chs.forEach((c) => c.delete());
     }
+    return matToImageData(cv, canvas);
+  } finally {
+    rgb.delete();
+    converted.delete();
+    planes.delete();
+    canvas.delete();
+    emptyMask.delete();
   }
-  return new ImageData(out, width, height);
 }
 
-function applyBoxBlur(src: ImageData, kernelSize = 5): ImageData {
-  const { width, height, data } = src;
-  const r = Math.max(1, Math.min(10, Math.floor(kernelSize / 2)));
-  const out = new Uint8ClampedArray(data.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let sr = 0;
-      let sg = 0;
-      let sb = 0;
-      let cnt = 0;
-      for (let dy = -r; dy <= r; dy++) {
-        const ny = Math.min(height - 1, Math.max(0, y + dy));
-        for (let dx = -r; dx <= r; dx++) {
-          const nx = Math.min(width - 1, Math.max(0, x + dx));
-          const idx = (ny * width + nx) * 4;
-          sr += data[idx];
-          sg += data[idx + 1];
-          sb += data[idx + 2];
-          cnt++;
-        }
-      }
-      const oIdx = (y * width + x) * 4;
-      out[oIdx] = Math.round(sr / cnt);
-      out[oIdx + 1] = Math.round(sg / cnt);
-      out[oIdx + 2] = Math.round(sb / cnt);
-      out[oIdx + 3] = 255;
-    }
+function applyAdaptiveThreshold(
+  cv: any,
+  src: ImageData,
+  method = 'gaussian',
+  blockSize = 11,
+  cConst = 4
+): ImageData {
+  const bSize = Math.max(3, Math.round(blockSize) | 1);
+  const gray = imageDataToGrayMat(cv, src);
+  const dst = new cv.Mat();
+  const adaptiveMethod =
+    method === 'mean' ? cv.ADAPTIVE_THRESH_MEAN_C : cv.ADAPTIVE_THRESH_GAUSSIAN_C;
+  try {
+    cv.adaptiveThreshold(gray, dst, 255, adaptiveMethod, cv.THRESH_BINARY, bSize, cConst);
+    return matToImageData(cv, dst);
+  } finally {
+    gray.delete();
+    dst.delete();
   }
-  return new ImageData(out, width, height);
 }
 
-function applySobel(src: ImageData, axis = 'xy', gain = 1.0): ImageData {
-  const { width, height } = src;
-  const gray = toGrayArray(src);
-  const out = new Uint8ClampedArray(width * height * 4);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const gx =
-        -gray[(y - 1) * width + (x - 1)] +
-        gray[(y - 1) * width + (x + 1)] -
-        2 * gray[y * width + (x - 1)] +
-        2 * gray[y * width + (x + 1)] -
-        gray[(y + 1) * width + (x - 1)] +
-        gray[(y + 1) * width + (x + 1)];
-      const gy =
-        -gray[(y - 1) * width + (x - 1)] -
-        2 * gray[(y - 1) * width + x] -
-        gray[(y - 1) * width + (x + 1)] +
-        gray[(y + 1) * width + (x - 1)] +
-        2 * gray[(y + 1) * width + x] +
-        gray[(y + 1) * width + (x + 1)];
-      const raw = axis === 'x' ? Math.abs(gx) : axis === 'y' ? Math.abs(gy) : Math.hypot(gx, gy);
-      const val = Math.min(255, Math.round(raw * gain));
-      const idx = (y * width + x) * 4;
-      out[idx] = out[idx + 1] = out[idx + 2] = val;
-      out[idx + 3] = 255;
-    }
+function applyOtsuThreshold(cv: any, src: ImageData, invert = false): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const dst = new cv.Mat();
+  const flag = (invert ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY) + cv.THRESH_OTSU;
+  try {
+    cv.threshold(gray, dst, 0, 255, flag);
+    return matToImageData(cv, dst);
+  } finally {
+    gray.delete();
+    dst.delete();
   }
-  return new ImageData(out, width, height);
 }
 
-function applyLaplacian(src: ImageData, gain = 1.5): ImageData {
-  const { width, height } = src;
-  const gray = toGrayArray(src);
-  const out = new Uint8ClampedArray(width * height * 4);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const lap =
-        gray[(y - 1) * width + x] +
-        gray[(y + 1) * width + x] +
-        gray[y * width + (x - 1)] +
-        gray[y * width + (x + 1)] -
-        4 * gray[y * width + x];
-      const val = Math.min(255, Math.round(Math.abs(lap) * gain));
-      const idx = (y * width + x) * 4;
-      out[idx] = out[idx + 1] = out[idx + 2] = val;
-      out[idx + 3] = 255;
-    }
+function applyBinaryThreshold(cv: any, src: ImageData, thresh = 128, mode = 'binary'): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const dst = new cv.Mat();
+  const flag =
+    mode === 'binary_inv'
+      ? cv.THRESH_BINARY_INV
+      : mode === 'trunc'
+        ? cv.THRESH_TRUNC
+        : mode === 'tozero'
+          ? cv.THRESH_TOZERO
+          : cv.THRESH_BINARY;
+  try {
+    cv.threshold(gray, dst, thresh, 255, flag);
+    return matToImageData(cv, dst);
+  } finally {
+    gray.delete();
+    dst.delete();
   }
-  return new ImageData(out, width, height);
-}
-
-function applyAdaptiveThreshold(src: ImageData, blockSize = 11, cConst = 4): ImageData {
-  const { width, height } = src;
-  const gray = toGrayArray(src);
-  const r = Math.max(1, Math.floor(Math.max(3, blockSize) / 2));
-
-  const integral = new Int32Array((width + 1) * (height + 1));
-  for (let y = 1; y <= height; y++) {
-    let rowSum = 0;
-    for (let x = 1; x <= width; x++) {
-      rowSum += gray[(y - 1) * width + (x - 1)];
-      integral[y * (width + 1) + x] = integral[(y - 1) * (width + 1) + x] + rowSum;
-    }
-  }
-
-  const out = new Uint8ClampedArray(width * height * 4);
-  for (let y = 0; y < height; y++) {
-    const y0 = Math.max(0, y - r);
-    const y1 = Math.min(height - 1, y + r);
-    for (let x = 0; x < width; x++) {
-      const x0 = Math.max(0, x - r);
-      const x1 = Math.min(width - 1, x + r);
-      const count = (x1 - x0 + 1) * (y1 - y0 + 1);
-      const sum =
-        integral[(y1 + 1) * (width + 1) + (x1 + 1)] -
-        integral[y0 * (width + 1) + (x1 + 1)] -
-        integral[(y1 + 1) * (width + 1) + x0] +
-        integral[y0 * (width + 1) + x0];
-      const thresh = sum / count - cConst;
-      const val = gray[y * width + x] > thresh ? 255 : 0;
-      const idx = (y * width + x) * 4;
-      out[idx] = val;
-      out[idx + 1] = val;
-      out[idx + 2] = val;
-      out[idx + 3] = 255;
-    }
-  }
-  return new ImageData(out, width, height);
-}
-
-function applyOtsuThreshold(src: ImageData, invert = false): ImageData {
-  const { width, height } = src;
-  const gray = toGrayArray(src);
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
-
-  const total = gray.length;
-  let sum = 0;
-  for (let i = 0; i < 256; i++) sum += i * hist[i];
-
-  let sumB = 0;
-  let wB = 0;
-  let maxVar = 0;
-  let thresh = 128;
-
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = total - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sum - sumB) / wF;
-    const varBetween = wB * wF * (mB - mF) * (mB - mF);
-    if (varBetween > maxVar) {
-      maxVar = varBetween;
-      thresh = t;
-    }
-  }
-
-  const out = new Uint8ClampedArray(width * height * 4);
-  for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-    const fg = gray[p] > thresh;
-    const val = (invert ? !fg : fg) ? 255 : 0;
-    out[i] = out[i + 1] = out[i + 2] = val;
-    out[i + 3] = 255;
-  }
-  return new ImageData(out, width, height);
 }
 
 function applyFindContours(
+  cv: any,
   maskImg: ImageData,
   overlayImg: ImageData | undefined,
   minArea = 40,
@@ -588,451 +821,231 @@ function applyFindContours(
   color = '#22C55E'
 ): ImageData {
   const { width, height } = maskImg;
-  const gray = toGrayArray(maskImg);
-  const visited = new Uint8Array(width * height);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d')!;
+  const gray = imageDataToGrayMat(cv, maskImg);
+  const bin = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hier = new cv.Mat();
+  let canvasMat: any;
   if (overlayImg) {
-    const resized = resizeImageData(overlayImg, width, height);
-    ctx.putImageData(resized, 0, 0);
+    const resized = resizeImageDataViaCv(cv, overlayImg, width, height);
+    canvasMat = imageDataToRgbMat(cv, resized);
   } else {
-    ctx.fillStyle = '#090B0E';
-    ctx.fillRect(0, 0, width, height);
+    canvasMat = new cv.Mat(height, width, cv.CV_8UC3, new cv.Scalar(9, 11, 14));
   }
 
-  const boxes: Array<{ minX: number; minY: number; maxX: number; maxY: number; area: number }> = [];
-  const boundaryMask = new Uint8Array(width * height);
-  const stack = new Int32Array(width * height);
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const start = y * width + x;
-      if (gray[start] <= 127 || visited[start]) continue;
-
-      let sp = 0;
-      stack[sp++] = start;
-      visited[start] = 1;
-      let area = 0;
-      let minX = x;
-      let maxX = x;
-      let minY = y;
-      let maxY = y;
-      const compPixels: number[] = [];
-
-      while (sp > 0) {
-        const cur = stack[--sp];
-        const cx = cur % width;
-        const cy = (cur / width) | 0;
-        area++;
-        compPixels.push(cur);
-        if (cx < minX) minX = cx;
-        if (cx > maxX) maxX = cx;
-        if (cy < minY) minY = cy;
-        if (cy > maxY) maxY = cy;
-
-        const nbs = [cur - 1, cur + 1, cur - width, cur + width];
-        for (const nb of nbs) {
-          if (nb >= 0 && nb < width * height && !visited[nb] && gray[nb] > 127) {
-            visited[nb] = 1;
-            stack[sp++] = nb;
-          }
-        }
-      }
-
-      if (area >= minArea) {
-        boxes.push({ minX, minY, maxX, maxY, area });
-        for (const p of compPixels) {
-          const px = p % width;
-          const py = (p / width) | 0;
-          if (
-            px === 0 ||
-            py === 0 ||
-            px === width - 1 ||
-            py === height - 1 ||
-            gray[p - 1] <= 127 ||
-            gray[p + 1] <= 127 ||
-            gray[p - width] <= 127 ||
-            gray[p + width] <= 127
-          ) {
-            boundaryMask[p] = 1;
-          }
-        }
-      }
-    }
-  }
-
-  const outImg = ctx.getImageData(0, 0, width, height);
   const [cr, cg, cb] = hexToRgb(color);
-  for (let p = 0, i = 0; p < boundaryMask.length; p++, i += 4) {
-    if (boundaryMask[p]) {
-      outImg.data[i] = cr;
-      outImg.data[i + 1] = cg;
-      outImg.data[i + 2] = cb;
-      outImg.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(outImg, 0, 0);
-
-  if (drawBoxes) {
-    ctx.strokeStyle = '#F58220';
-    ctx.lineWidth = 1.5;
-    boxes.slice(0, 40).forEach((b) => {
-      ctx.strokeRect(b.minX, b.minY, Math.max(2, b.maxX - b.minX), Math.max(2, b.maxY - b.minY));
-    });
-  }
-
-  return ctx.getImageData(0, 0, width, height);
-}
-
-function applyCornerDetect(src: ImageData, maxCorners = 45, threshold = 35, color = '#F58220'): ImageData {
-  const { width, height } = src;
-  const gray = toGrayArray(src);
-  const corners: Array<{ x: number; y: number; score: number }> = [];
-
-  for (let y = 4; y < height - 4; y += 3) {
-    for (let x = 4; x < width - 4; x += 3) {
-      let ixx = 0;
-      let iyy = 0;
-      let ixy = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const p = (y + dy) * width + (x + dx);
-          const gx = gray[p + 1] - gray[p - 1];
-          const gy = gray[p + width] - gray[p - width];
-          ixx += gx * gx;
-          iyy += gy * gy;
-          ixy += gx * gy;
+  try {
+    cv.threshold(gray, bin, 127, 255, cv.THRESH_BINARY);
+    cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let drawnBoxes = 0;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area >= minArea) {
+        cv.drawContours(canvasMat, contours, i, new cv.Scalar(cr, cg, cb), 2, cv.LINE_AA);
+        if (drawBoxes && drawnBoxes < 40) {
+          const rect = cv.boundingRect(cnt);
+          cv.rectangle(
+            canvasMat,
+            new cv.Point(rect.x, rect.y),
+            new cv.Point(rect.x + rect.width, rect.y + rect.height),
+            new cv.Scalar(245, 130, 32),
+            1,
+            cv.LINE_AA
+          );
+          drawnBoxes++;
         }
       }
-      const det = ixx * iyy - ixy * ixy;
-      const trace = ixx + iyy;
-      const r = (det - 0.04 * trace * trace) / 1e6;
-      if (r > threshold) {
-        corners.push({ x, y, score: r });
-      }
+      cnt.delete();
     }
+    return matToImageData(cv, canvasMat);
+  } finally {
+    gray.delete();
+    bin.delete();
+    contours.delete();
+    hier.delete();
+    canvasMat.delete();
   }
-
-  corners.sort((a, b) => b.score - a.score);
-  const chosen: Array<{ x: number; y: number }> = [];
-  for (const c of corners) {
-    if (chosen.every((k) => Math.hypot(k.x - c.x, k.y - c.y) > 10)) {
-      chosen.push({ x: c.x, y: c.y });
-      if (chosen.length >= maxCorners) break;
-    }
-  }
-
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d')!;
-  ctx.putImageData(src, 0, 0);
-  ctx.fillStyle = color;
-  ctx.strokeStyle = '#0B0D10';
-  ctx.lineWidth = 1;
-  chosen.forEach((pt) => {
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 3.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-  });
-
-  return ctx.getImageData(0, 0, width, height);
 }
 
-function applyCanny(src: ImageData, t1 = 60, t2 = 150): ImageData {
-  const { width, height } = src;
-  const gray = toGrayArray(src);
-  const mag = new Float32Array(width * height);
-  const dir = new Uint8Array(width * height);
+function applyCornerDetect(
+  cv: any,
+  src: ImageData,
+  maxCorners = 45,
+  threshold = 35,
+  color = '#F58220'
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const gray = new cv.Mat();
+  const gftt = new cv.GFTTDetector();
+  const keypoints = new cv.KeyPointVector();
+  const [cr, cg, cb] = hexToRgb(color);
+  try {
+    cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+    gftt.setMaxFeatures(Math.max(1, Math.round(maxCorners)));
+    gftt.setQualityLevel(Math.max(0.002, Math.min(0.25, threshold / 800)));
+    gftt.setMinDistance(10);
+    gftt.detect(gray, keypoints);
 
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const p = y * width + x;
-      const gx =
-        -gray[(y - 1) * width + (x - 1)] +
-        gray[(y - 1) * width + (x + 1)] -
-        2 * gray[y * width + (x - 1)] +
-        2 * gray[y * width + (x + 1)] -
-        gray[(y + 1) * width + (x - 1)] +
-        gray[(y + 1) * width + (x + 1)];
-      const gy =
-        -gray[(y - 1) * width + (x - 1)] -
-        2 * gray[(y - 1) * width + x] -
-        gray[(y - 1) * width + (x + 1)] +
-        gray[(y + 1) * width + (x - 1)] +
-        2 * gray[(y + 1) * width + x] +
-        gray[(y + 1) * width + (x + 1)];
-      mag[p] = Math.hypot(gx, gy);
-      const angle = (Math.atan2(gy, gx) * 180) / Math.PI;
-      const a = angle < 0 ? angle + 180 : angle;
-      if (a < 22.5 || a >= 157.5) dir[p] = 0;
-      else if (a < 67.5) dir[p] = 1;
-      else if (a < 112.5) dir[p] = 2;
-      else dir[p] = 3;
+    for (let i = 0; i < keypoints.size(); i++) {
+      const kp = keypoints.get(i);
+      const pt = new cv.Point(Math.round(kp.pt.x), Math.round(kp.pt.y));
+      cv.circle(rgb, pt, 4, new cv.Scalar(11, 13, 16), -1, cv.LINE_AA);
+      cv.circle(rgb, pt, 3, new cv.Scalar(cr, cg, cb), -1, cv.LINE_AA);
     }
+    return matToImageData(cv, rgb);
+  } finally {
+    rgb.delete();
+    gray.delete();
+    gftt.delete();
+    keypoints.delete();
   }
-
-  const out = new Uint8ClampedArray(width * height * 4);
-  const low = Math.min(t1, t2);
-  const high = Math.max(t1, t2);
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const p = y * width + x;
-      const m = mag[p];
-      let n1 = 0;
-      let n2 = 0;
-      if (dir[p] === 0) {
-        n1 = mag[p - 1];
-        n2 = mag[p + 1];
-      } else if (dir[p] === 1) {
-        n1 = mag[(y - 1) * width + x + 1];
-        n2 = mag[(y + 1) * width + x - 1];
-      } else if (dir[p] === 2) {
-        n1 = mag[(y - 1) * width + x];
-        n2 = mag[(y + 1) * width + x];
-      } else {
-        n1 = mag[(y - 1) * width + x - 1];
-        n2 = mag[(y + 1) * width + x + 1];
-      }
-      let edge = 0;
-      if (m >= n1 && m >= n2) {
-        if (m >= high) edge = 255;
-        else if (m >= low) {
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              if (mag[(y + dy) * width + (x + dx)] >= high) {
-                edge = 255;
-                break;
-              }
-            }
-          }
-        }
-      }
-      const idx = p * 4;
-      out[idx] = edge;
-      out[idx + 1] = edge;
-      out[idx + 2] = edge;
-      out[idx + 3] = 255;
-    }
-  }
-  return new ImageData(out, width, height);
 }
 
-function applyMorphology(src: ImageData, mode: 'dilate' | 'erode', kernelSize = 3, iterations = 1): ImageData {
-  const { width, height } = src;
-  const r = Math.max(1, Math.floor(Math.max(1, kernelSize) / 2));
-  let current = new Uint8ClampedArray(src.data);
-
-  for (let iter = 0; iter < Math.max(1, Math.min(6, iterations)); iter++) {
-    const next = new Uint8ClampedArray(current.length);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let bestR = mode === 'dilate' ? 0 : 255;
-        let bestG = mode === 'dilate' ? 0 : 255;
-        let bestB = mode === 'dilate' ? 0 : 255;
-        for (let dy = -r; dy <= r; dy++) {
-          const ny = Math.min(height - 1, Math.max(0, y + dy));
-          for (let dx = -r; dx <= r; dx++) {
-            const nx = Math.min(width - 1, Math.max(0, x + dx));
-            const idx = (ny * width + nx) * 4;
-            if (mode === 'dilate') {
-              if (current[idx] > bestR) bestR = current[idx];
-              if (current[idx + 1] > bestG) bestG = current[idx + 1];
-              if (current[idx + 2] > bestB) bestB = current[idx + 2];
-            } else {
-              if (current[idx] < bestR) bestR = current[idx];
-              if (current[idx + 1] < bestG) bestG = current[idx + 1];
-              if (current[idx + 2] < bestB) bestB = current[idx + 2];
-            }
-          }
-        }
-        const outIdx = (y * width + x) * 4;
-        next[outIdx] = bestR;
-        next[outIdx + 1] = bestG;
-        next[outIdx + 2] = bestB;
-        next[outIdx + 3] = 255;
-      }
-    }
-    current = next;
-  }
-  return new ImageData(current, width, height);
-}
-
-function applyDrawHistogram(src: ImageData, mode = 'channels', plotW = 512, plotH = 256): ImageData {
-  const w = Math.max(128, Math.min(512, plotW));
-  const h = Math.max(128, Math.min(512, plotH));
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d')!;
-  ctx.clearRect(0, 0, w, h);
-
-  const rHist = new Uint32Array(256);
-  const gHist = new Uint32Array(256);
-  const bHist = new Uint32Array(256);
-
-  for (let i = 0; i < src.data.length; i += 4) {
-    if (mode === 'luminance') {
-      const lum = Math.round(0.299 * src.data[i] + 0.587 * src.data[i + 1] + 0.114 * src.data[i + 2]);
-      rHist[lum]++;
-    } else if (mode === 'hsv') {
-      const [hv, sv, vv] = rgbToHsvPixel(src.data[i], src.data[i + 1], src.data[i + 2]);
-      rHist[hv]++;
-      gHist[sv]++;
-      bHist[vv]++;
-    } else {
-      rHist[src.data[i]]++;
-      gHist[src.data[i + 1]]++;
-      bHist[src.data[i + 2]]++;
-    }
-  }
-
-  let maxVal = 1;
-  for (let i = 2; i < 254; i++) {
-    maxVal = Math.max(maxVal, rHist[i], gHist[i], bHist[i]);
-  }
-
-  const drawChannel = (hist: Uint32Array, fill: string, stroke: string) => {
-    ctx.beginPath();
-    ctx.moveTo(0, h);
-    for (let bin = 0; bin < 256; bin++) {
-      const x = (bin / 255) * w;
-      const norm = Math.min(1, hist[bin] / maxVal);
-      const y = h - norm * (h * 0.88);
-      ctx.lineTo(x, y);
-    }
-    ctx.lineTo(w, h);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  };
-
-  if (mode === 'luminance') {
-    drawChannel(rHist, 'rgba(226, 232, 240, 0.72)', 'rgba(248, 250, 252, 0.95)');
-  } else {
-    drawChannel(bHist, 'rgba(59, 130, 246, 0.65)', 'rgba(96, 165, 250, 0.95)');
-    drawChannel(gHist, 'rgba(34, 197, 94, 0.62)', 'rgba(74, 222, 128, 0.95)');
-    drawChannel(rHist, 'rgba(239, 68, 68, 0.62)', 'rgba(248, 113, 113, 0.95)');
-  }
-
-  return ctx.getImageData(0, 0, w, h);
-}
+// ============================================================================
+// MATH & MORPHOLOGY (100% window.cv)
+// ============================================================================
 
 function applyArithmetic(
+  cv: any,
   imgA: ImageData,
   imgB: ImageData | undefined,
   mask: ImageData | undefined,
   operation = 'add',
   alpha = 0.65
 ): ImageData {
-  if (!imgB) return cloneImageData(imgA);
-  const bResized = resizeImageData(imgB, imgA.width, imgA.height);
-  const mResized = mask ? resizeImageData(mask, imgA.width, imgA.height) : undefined;
-  const out = new Uint8ClampedArray(imgA.data.length);
+  if (!imgB) return cloneImageDataViaCv(cv, imgA);
+  const bResizedImg = resizeImageDataViaCv(cv, imgB, imgA.width, imgA.height);
+  const aRgb = imageDataToRgbMat(cv, imgA);
+  const bRgb = imageDataToRgbMat(cv, bResizedImg);
+  const resRgb = new cv.Mat();
+  const finalRgb = aRgb.clone();
+  let maskBin: any = null;
 
-  for (let i = 0; i < imgA.data.length; i += 4) {
-    const maskActive = !mResized || mResized.data[i] > 127;
-    if (!maskActive) {
-      out[i] = imgA.data[i];
-      out[i + 1] = imgA.data[i + 1];
-      out[i + 2] = imgA.data[i + 2];
-      out[i + 3] = 255;
-      continue;
+  try {
+    if (operation === 'subtract') cv.subtract(aRgb, bRgb, resRgb);
+    else if (operation === 'absdiff') cv.absdiff(aRgb, bRgb, resRgb);
+    else if (operation === 'bitwise_or') cv.bitwise_or(aRgb, bRgb, resRgb);
+    else if (operation === 'bitwise_and') cv.bitwise_and(aRgb, bRgb, resRgb);
+    else if (operation === 'bitwise_xor') cv.bitwise_xor(aRgb, bRgb, resRgb);
+    else if (operation === 'blend') cv.addWeighted(aRgb, alpha, bRgb, 1 - alpha, 0, resRgb);
+    else cv.add(aRgb, bRgb, resRgb);
+
+    if (mask) {
+      const mResized = resizeImageDataViaCv(cv, mask, imgA.width, imgA.height);
+      const mGray = imageDataToGrayMat(cv, mResized);
+      maskBin = new cv.Mat();
+      cv.threshold(mGray, maskBin, 127, 255, cv.THRESH_BINARY);
+      mGray.delete();
+      resRgb.copyTo(finalRgb, maskBin);
+      return matToImageData(cv, finalRgb);
     }
 
-    for (let c = 0; c < 3; c++) {
-      const a = imgA.data[i + c];
-      const b = bResized.data[i + c];
-      let v = a;
-      if (operation === 'add') v = Math.min(255, a + b);
-      else if (operation === 'subtract') v = Math.max(0, a - b);
-      else if (operation === 'absdiff') v = Math.abs(a - b);
-      else if (operation === 'bitwise_or') v = a | b;
-      else if (operation === 'bitwise_and') v = a & b;
-      else if (operation === 'bitwise_xor') v = a ^ b;
-      else if (operation === 'blend') v = Math.round(a * alpha + b * (1 - alpha));
-      out[i + c] = v;
+    return matToImageData(cv, resRgb);
+  } finally {
+    aRgb.delete();
+    bRgb.delete();
+    resRgb.delete();
+    finalRgb.delete();
+    if (maskBin) maskBin.delete();
+  }
+}
+
+function applyMaskOp(cv: any, img: ImageData, mask: ImageData | undefined, invertMask = false): ImageData {
+  if (!mask) return cloneImageDataViaCv(cv, img);
+  const mResized = resizeImageDataViaCv(cv, mask, img.width, img.height);
+  const rgb = imageDataToRgbMat(cv, img);
+  const mGray = imageDataToGrayMat(cv, mResized);
+  const mBin = new cv.Mat();
+  const mInv = new cv.Mat();
+  const out = new cv.Mat(img.height, img.width, cv.CV_8UC3, new cv.Scalar(0, 0, 0));
+  try {
+    cv.threshold(mGray, mBin, 127, 255, cv.THRESH_BINARY);
+    if (invertMask) {
+      cv.bitwise_not(mBin, mInv);
+      rgb.copyTo(out, mInv);
+    } else {
+      rgb.copyTo(out, mBin);
     }
-    out[i + 3] = 255;
+    return matToImageData(cv, out);
+  } finally {
+    rgb.delete();
+    mGray.delete();
+    mBin.delete();
+    mInv.delete();
+    out.delete();
   }
-  return new ImageData(out, imgA.width, imgA.height);
 }
 
-function applyMaskOp(img: ImageData, mask: ImageData | undefined, invertMask = false): ImageData {
-  if (!mask) return cloneImageData(img);
-  const mResized = resizeImageData(mask, img.width, img.height);
-  const out = new Uint8ClampedArray(img.data.length);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const mVal = mResized.data[i] > 127;
-    const keep = invertMask ? !mVal : mVal;
-    out[i] = keep ? img.data[i] : 0;
-    out[i + 1] = keep ? img.data[i + 1] : 0;
-    out[i + 2] = keep ? img.data[i + 2] : 0;
-    out[i + 3] = 255;
+function applyBitwiseNot(cv: any, src: ImageData): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const dst = new cv.Mat();
+  try {
+    cv.bitwise_not(rgb, dst);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    dst.delete();
   }
-  return new ImageData(out, img.width, img.height);
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const clean = hex.replace('#', '');
-  const num = parseInt(clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean, 16);
-  if (Number.isNaN(num)) return [34, 197, 94];
-  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
-}
-
-function sampleBilinearBorder(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  sx: number,
-  sy: number,
-  borderMode: string
-): [number, number, number] {
-  let x = sx;
-  let y = sy;
-  if (x < 0 || x >= w - 1 || y < 0 || y >= h - 1) {
-    if (borderMode === 'constant') {
-      if (x < -0.5 || x > w - 0.5 || y < -0.5 || y > h - 0.5) return [0, 0, 0];
-    } else if (borderMode === 'reflect') {
-      while (x < 0 || x >= w) x = x < 0 ? -x : 2 * w - 2 - x;
-      while (y < 0 || y >= h) y = y < 0 ? -y : 2 * h - 2 - y;
+function applyGammaCorrection(cv: any, src: ImageData, gamma = 1.35): ImageData {
+  const g = Math.max(0.1, gamma);
+  const invGamma = 1 / g;
+  const rgb = imageDataToRgbMat(cv, src);
+  const lut = new cv.Mat(1, 256, cv.CV_8UC1);
+  const dst = new cv.Mat();
+  try {
+    for (let i = 0; i < 256; i++) {
+      lut.data[i] = Math.min(255, Math.max(0, Math.round(Math.pow(i / 255, invGamma) * 255)));
     }
-    x = Math.min(w - 1, Math.max(0, x));
-    y = Math.min(h - 1, Math.max(0, y));
+    cv.LUT(rgb, lut, dst);
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    lut.delete();
+    dst.delete();
   }
-
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const x1 = Math.min(w - 1, x0 + 1);
-  const y1 = Math.min(h - 1, y0 + 1);
-  const fx = x - x0;
-  const fy = y - y0;
-
-  const i00 = (y0 * w + x0) * 4;
-  const i10 = (y0 * w + x1) * 4;
-  const i01 = (y1 * w + x0) * 4;
-  const i11 = (y1 * w + x1) * 4;
-
-  const interp = (off: number) =>
-    Math.round(
-      data[i00 + off] * (1 - fx) * (1 - fy) +
-        data[i10 + off] * fx * (1 - fy) +
-        data[i01 + off] * (1 - fx) * fy +
-        data[i11 + off] * fx * fy
-    );
-
-  return [interp(0), interp(1), interp(2)];
 }
+
+function applyMorphology(
+  cv: any,
+  src: ImageData,
+  mode: 'dilate' | 'erode' | 'open' | 'close' | 'gradient',
+  kernelSize = 3,
+  iterations = 1
+): ImageData {
+  const k = Math.max(1, Math.round(kernelSize) | 1);
+  const iter = Math.max(1, Math.min(10, Math.round(iterations)));
+  const rgb = imageDataToRgbMat(cv, src);
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(k, k));
+  const dst = new cv.Mat();
+  try {
+    if (mode === 'dilate') {
+      cv.dilate(rgb, dst, kernel, new cv.Point(-1, -1), iter, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+    } else if (mode === 'erode') {
+      cv.erode(rgb, dst, kernel, new cv.Point(-1, -1), iter, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+    } else if (mode === 'open') {
+      cv.morphologyEx(rgb, dst, cv.MORPH_OPEN, kernel);
+    } else if (mode === 'close') {
+      cv.morphologyEx(rgb, dst, cv.MORPH_CLOSE, kernel);
+    } else {
+      cv.morphologyEx(rgb, dst, cv.MORPH_GRADIENT, kernel);
+    }
+    return matToImageData(cv, dst);
+  } finally {
+    rgb.delete();
+    kernel.delete();
+    dst.delete();
+  }
+}
+
+// ============================================================================
+// GEOMETRIC TRANSFORMATIONS (100% window.cv)
+// ============================================================================
 
 function applyWarpAffine(
+  cv: any,
   src: ImageData,
   angleDeg = 18,
   scale = 0.92,
@@ -1041,14 +1054,13 @@ function applyWarpAffine(
   shearX = 0,
   borderMode = 'constant'
 ): ImageData {
-  const { width: w, height: h, data } = src;
+  const { width: w, height: h } = src;
   const rad = (angleDeg * Math.PI) / 180;
   const cos = Math.cos(rad) * scale;
   const sin = Math.sin(rad) * scale;
   const cx = w / 2;
   const cy = h / 2;
 
-  // Forward affine M: [a b c; d e f] around center + shear + translate
   const a = cos;
   const b = sin + shearX * cos;
   const d = -sin;
@@ -1056,97 +1068,27 @@ function applyWarpAffine(
   const c = cx - a * cx - b * cy + tx;
   const f = cy - d * cx - e * cy + ty;
 
-  if (isOpenCVWasmReady()) {
-    try {
-      const cv = window.cv;
-      const srcMat = cv.matFromImageData(src);
-      const dstMat = new cv.Mat();
-      const M = cv.matFromArray(2, 3, cv.CV_64FC1, [a, b, c, d, e, f]);
-      const bFlag =
-        borderMode === 'reflect'
-          ? cv.BORDER_REFLECT
-          : borderMode === 'replicate'
-            ? cv.BORDER_REPLICATE
-            : cv.BORDER_CONSTANT;
-      cv.warpAffine(srcMat, dstMat, M, new cv.Size(w, h), cv.INTER_LINEAR, bFlag, new cv.Scalar(0, 0, 0, 255));
-      const out = new ImageData(new Uint8ClampedArray(dstMat.data), dstMat.cols, dstMat.rows);
-      srcMat.delete();
-      dstMat.delete();
-      M.delete();
-      return out;
-    } catch {
-      // Fallback to inverse bilinear sampling below
-    }
+  const srcMat = cv.matFromImageData(src);
+  const dstMat = new cv.Mat();
+  const M = cv.matFromArray(2, 3, cv.CV_64FC1, [a, b, c, d, e, f]);
+  const bFlag =
+    borderMode === 'reflect'
+      ? cv.BORDER_REFLECT
+      : borderMode === 'replicate'
+        ? cv.BORDER_REPLICATE
+        : cv.BORDER_CONSTANT;
+  try {
+    cv.warpAffine(srcMat, dstMat, M, new cv.Size(w, h), cv.INTER_LINEAR, bFlag, new cv.Scalar(0, 0, 0, 255));
+    return matToImageData(cv, dstMat);
+  } finally {
+    srcMat.delete();
+    dstMat.delete();
+    M.delete();
   }
-
-  const det = a * e - b * d;
-  if (Math.abs(det) < 1e-6) return cloneImageData(src);
-  const invA = e / det;
-  const invB = -b / det;
-  const invD = -d / det;
-  const invE = a / det;
-
-  const out = new Uint8ClampedArray(data.length);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const dx = x - c;
-      const dy = y - f;
-      const sx = invA * dx + invB * dy;
-      const sy = invD * dx + invE * dy;
-      const [r, g, bl] = sampleBilinearBorder(data, w, h, sx, sy, borderMode);
-      const idx = (y * w + x) * 4;
-      out[idx] = r;
-      out[idx + 1] = g;
-      out[idx + 2] = bl;
-      out[idx + 3] = 255;
-    }
-  }
-  return new ImageData(out, w, h);
 }
 
-function solveLinear8(A: number[][], b: number[]): number[] {
-  const n = 8;
-  const M = A.map((row, i) => [...row, b[i]]);
-  for (let i = 0; i < n; i++) {
-    let maxRow = i;
-    for (let r = i + 1; r < n; r++) {
-      if (Math.abs(M[r][i]) > Math.abs(M[maxRow][i])) maxRow = r;
-    }
-    [M[i], M[maxRow]] = [M[maxRow], M[i]];
-    const pivot = Math.abs(M[i][i]) < 1e-10 ? 1e-10 : M[i][i];
-    for (let j = i; j <= n; j++) M[i][j] /= pivot;
-    for (let r = 0; r < n; r++) {
-      if (r === i) continue;
-      const factor = M[r][i];
-      for (let j = i; j <= n; j++) M[r][j] -= factor * M[i][j];
-    }
-  }
-  return M.map((row) => row[n]);
-}
-
-function computeHomography(
-  srcPts: Array<[number, number]>,
-  dstPts: Array<[number, number]>
-): number[] {
-  const A: number[][] = [];
-  const b: number[] = [];
-  for (let i = 0; i < 4; i++) {
-    const [x, y] = srcPts[i];
-    const [u, v] = dstPts[i];
-    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
-    b.push(u);
-    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
-    b.push(v);
-  }
-  const h = solveLinear8(A, b);
-  return [...h, 1];
-}
-
-function applyWarpPerspective(
-  src: ImageData,
-  params: Record<string, unknown>
-): ImageData {
-  const { width: w, height: h, data } = src;
+function applyWarpPerspective(cv: any, src: ImageData, params: Record<string, unknown>): ImageData {
+  const { width: w, height: h } = src;
   const tlX = (Number(params.tlX ?? 12) / 100) * w;
   const tlY = (Number(params.tlY ?? 8) / 100) * h;
   const trX = (Number(params.trX ?? 88) / 100) * w;
@@ -1157,59 +1099,712 @@ function applyWarpPerspective(
   const blY = (Number(params.blY ?? 92) / 100) * h;
   const borderMode = String(params.borderMode || 'constant');
 
-  const srcPts: Array<[number, number]> = [
-    [0, 0],
-    [w - 1, 0],
-    [w - 1, h - 1],
-    [0, h - 1],
-  ];
-  const dstPts: Array<[number, number]> = [
-    [tlX, tlY],
-    [trX, trY],
-    [brX, brY],
-    [blX, blY],
-  ];
+  const srcPts = [0, 0, w - 1, 0, w - 1, h - 1, 0, h - 1];
+  const dstPts = [tlX, tlY, trX, trY, brX, brY, blX, blY];
 
-  if (isOpenCVWasmReady()) {
-    try {
-      const cv = window.cv;
-      const srcMat = cv.matFromImageData(src);
-      const dstMat = new cv.Mat();
-      const sMat = cv.matFromArray(4, 1, cv.CV_32FC2, srcPts.flat());
-      const dMat = cv.matFromArray(4, 1, cv.CV_32FC2, dstPts.flat());
-      const M = cv.getPerspectiveTransform(sMat, dMat);
-      const bFlag = borderMode === 'replicate' ? cv.BORDER_REPLICATE : cv.BORDER_CONSTANT;
-      cv.warpPerspective(srcMat, dstMat, M, new cv.Size(w, h), cv.INTER_LINEAR, bFlag, new cv.Scalar(0, 0, 0, 255));
-      const out = new ImageData(new Uint8ClampedArray(dstMat.data), dstMat.cols, dstMat.rows);
-      srcMat.delete();
-      dstMat.delete();
-      sMat.delete();
-      dMat.delete();
-      M.delete();
-      return out;
-    } catch {
-      // Fallback to projective inverse DLT homography below
-    }
+  const srcMat = cv.matFromImageData(src);
+  const dstMat = new cv.Mat();
+  const sMat = cv.matFromArray(4, 1, cv.CV_32FC2, srcPts);
+  const dMat = cv.matFromArray(4, 1, cv.CV_32FC2, dstPts);
+  const M = cv.getPerspectiveTransform(sMat, dMat);
+  const bFlag = borderMode === 'replicate' ? cv.BORDER_REPLICATE : cv.BORDER_CONSTANT;
+  try {
+    cv.warpPerspective(srcMat, dstMat, M, new cv.Size(w, h), cv.INTER_LINEAR, bFlag, new cv.Scalar(0, 0, 0, 255));
+    return matToImageData(cv, dstMat);
+  } finally {
+    srcMat.delete();
+    dstMat.delete();
+    sMat.delete();
+    dMat.delete();
+    M.delete();
   }
-
-  // Inverse homography maps dst (x, y) -> src (sx, sy)
-  const invH = computeHomography(dstPts, srcPts);
-  const out = new Uint8ClampedArray(data.length);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const denom = invH[6] * x + invH[7] * y + invH[8];
-      const sx = (invH[0] * x + invH[1] * y + invH[2]) / (Math.abs(denom) < 1e-6 ? 1e-6 : denom);
-      const sy = (invH[3] * x + invH[4] * y + invH[5]) / (Math.abs(denom) < 1e-6 ? 1e-6 : denom);
-      const [r, g, bl] = sampleBilinearBorder(data, w, h, sx, sy, borderMode);
-      const idx = (y * w + x) * 4;
-      out[idx] = r;
-      out[idx + 1] = g;
-      out[idx + 2] = bl;
-      out[idx + 3] = 255;
-    }
-  }
-  return new ImageData(out, w, h);
 }
+
+// ============================================================================
+// OPENCV FACE MODULE (cv.FaceDetectorYN + cv.inRange + cv.connectedComponentsWithStats)
+// ============================================================================
+
+interface DetectedFace {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+  rightEye: [number, number];
+  leftEye: [number, number];
+  nose: [number, number];
+  mouthRight: [number, number];
+  mouthLeft: [number, number];
+}
+
+async function detectFacesWithOpenCV(
+  cv: any,
+  rgbMat: any,
+  scoreThresh = 0.55
+): Promise<DetectedFace[]> {
+  const modelReady = await ensureYuNetModel(cv);
+  const w = rgbMat.cols;
+  const h = rgbMat.rows;
+
+  if (modelReady && cv.FaceDetectorYN) {
+    const bgr = new cv.Mat();
+    const faces = new cv.Mat();
+    let det: any = null;
+    try {
+      cv.cvtColor(rgbMat, bgr, cv.COLOR_RGB2BGR);
+      det = new cv.FaceDetectorYN('/yunet.onnx', '', new cv.Size(w, h), scoreThresh, 0.3, 5000, 0, 0);
+      det.detect(bgr, faces);
+
+      const detected: DetectedFace[] = [];
+      for (let i = 0; i < faces.rows; i++) {
+        const off = i * 15;
+        const d = faces.data32F;
+        detected.push({
+          x: Math.max(0, Math.round(d[off])),
+          y: Math.max(0, Math.round(d[off + 1])),
+          w: Math.max(8, Math.round(d[off + 2])),
+          h: Math.max(8, Math.round(d[off + 3])),
+          rightEye: [d[off + 4], d[off + 5]],
+          leftEye: [d[off + 6], d[off + 7]],
+          nose: [d[off + 8], d[off + 9]],
+          mouthRight: [d[off + 10], d[off + 11]],
+          mouthLeft: [d[off + 12], d[off + 13]],
+          score: d[off + 14],
+        });
+      }
+      if (detected.length > 0) return detected;
+    } finally {
+      bgr.delete();
+      faces.delete();
+      if (det) det.delete();
+    }
+  }
+
+  // Fallback within OpenCV using YCrCb chrominance + connectedComponentsWithStats + minMaxLoc
+  const ycrcb = new cv.Mat();
+  const mask = new cv.Mat();
+  const low = new cv.Mat(h, w, cv.CV_8UC3, new cv.Scalar(45, 133, 75));
+  const high = new cv.Mat(h, w, cv.CV_8UC3, new cv.Scalar(255, 182, 132));
+  const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+  const clean = new cv.Mat();
+  const labels = new cv.Mat();
+  const stats = new cv.Mat();
+  const centroids = new cv.Mat();
+  const gray = new cv.Mat();
+
+  try {
+    cv.cvtColor(rgbMat, ycrcb, cv.COLOR_RGB2YCrCb);
+    cv.inRange(ycrcb, low, high, mask);
+    cv.morphologyEx(mask, clean, cv.MORPH_OPEN, kernel);
+    const numLabels = cv.connectedComponentsWithStats(clean, labels, stats, centroids, 8, cv.CV_32S);
+
+    let bestLabel = -1;
+    let bestArea = w * h * 0.03;
+    for (let lbl = 1; lbl < numLabels; lbl++) {
+      const area = stats.intAt(lbl, cv.CC_STAT_AREA);
+      if (area > bestArea) {
+        bestArea = area;
+        bestLabel = lbl;
+      }
+    }
+    if (bestLabel === -1) return [];
+
+    const rx = stats.intAt(bestLabel, cv.CC_STAT_LEFT);
+    const ry = stats.intAt(bestLabel, cv.CC_STAT_TOP);
+    const rw = Math.min(w - rx, stats.intAt(bestLabel, cv.CC_STAT_WIDTH));
+    const rh = Math.min(h - ry, stats.intAt(bestLabel, cv.CC_STAT_HEIGHT));
+
+    cv.cvtColor(rgbMat, gray, cv.COLOR_RGB2GRAY);
+    const eyeY0 = Math.max(0, Math.round(ry + rh * 0.2));
+    const eyeH = Math.max(8, Math.round(rh * 0.25));
+    const halfW = Math.max(8, Math.round(rw * 0.35));
+
+    const lRect = new cv.Rect(
+      Math.max(0, Math.round(rx + rw * 0.14)),
+      eyeY0,
+      Math.min(w - Math.round(rx + rw * 0.14), halfW),
+      Math.min(h - eyeY0, eyeH)
+    );
+    const rRect = new cv.Rect(
+      Math.max(0, Math.round(rx + rw * 0.5)),
+      eyeY0,
+      Math.min(w - Math.round(rx + rw * 0.5), halfW),
+      Math.min(h - eyeY0, eyeH)
+    );
+
+    const lRoi = gray.roi(lRect);
+    const rRoi = gray.roi(rRect);
+    const lLoc = cv.minMaxLoc(lRoi).minLoc;
+    const rLoc = cv.minMaxLoc(rRoi).minLoc;
+    lRoi.delete();
+    rRoi.delete();
+
+    const le: [number, number] = [lRect.x + lLoc.x, lRect.y + lLoc.y];
+    const re: [number, number] = [rRect.x + rLoc.x, rRect.y + rLoc.y];
+    const nose: [number, number] = [(le[0] + re[0]) * 0.5, (le[1] + re[1]) * 0.5 + rh * 0.2];
+
+    return [
+      {
+        x: rx,
+        y: ry,
+        w: rw,
+        h: rh,
+        score: Math.min(0.95, 0.72 + bestArea / (w * h)),
+        rightEye: le,
+        leftEye: re,
+        nose,
+        mouthRight: [nose[0] - rw * 0.14, nose[1] + rh * 0.18],
+        mouthLeft: [nose[0] + rw * 0.14, nose[1] + rh * 0.18],
+      },
+    ];
+  } finally {
+    ycrcb.delete();
+    mask.delete();
+    low.delete();
+    high.delete();
+    kernel.delete();
+    clean.delete();
+    labels.delete();
+    stats.delete();
+    centroids.delete();
+    gray.delete();
+  }
+}
+
+async function applyFaceDetectHaar(
+  cv: any,
+  src: ImageData,
+  scaleFactor = 1.1,
+  minNeighbors = 4,
+  privacyMode = 'bbox',
+  boxColor = '#F43F5E'
+): Promise<ImageData> {
+  const rgb = imageDataToRgbMat(cv, src);
+  const [cr, cg, cb] = hexToRgb(boxColor);
+  try {
+    const scoreThresh = Math.max(0.3, Math.min(0.85, 0.35 + minNeighbors * 0.045 - (scaleFactor - 1.1) * 0.2));
+    const faces = await detectFacesWithOpenCV(cv, rgb, scoreThresh);
+
+    for (const face of faces) {
+      const fx = Math.max(0, Math.min(rgb.cols - 2, face.x));
+      const fy = Math.max(0, Math.min(rgb.rows - 2, face.y));
+      const fw = Math.max(4, Math.min(rgb.cols - fx, face.w));
+      const fh = Math.max(4, Math.min(rgb.rows - fy, face.h));
+      const rect = new cv.Rect(fx, fy, fw, fh);
+
+      if (privacyMode === 'blur') {
+        const roi = rgb.roi(rect);
+        const blurred = new cv.Mat();
+        cv.GaussianBlur(roi, blurred, new cv.Size(25, 25), 0, 0, cv.BORDER_DEFAULT);
+        blurred.copyTo(roi);
+        blurred.delete();
+        roi.delete();
+      } else if (privacyMode === 'pixelate') {
+        const roi = rgb.roi(rect);
+        const down = new cv.Mat();
+        const pix = new cv.Mat();
+        cv.resize(
+          roi,
+          down,
+          new cv.Size(Math.max(4, Math.round(fw / 12)), Math.max(4, Math.round(fh / 12))),
+          0,
+          0,
+          cv.INTER_AREA
+        );
+        cv.resize(down, pix, new cv.Size(fw, fh), 0, 0, cv.INTER_NEAREST);
+        pix.copyTo(roi);
+        down.delete();
+        pix.delete();
+        roi.delete();
+      }
+
+      cv.rectangle(rgb, new cv.Point(fx, fy), new cv.Point(fx + fw, fy + fh), new cv.Scalar(cr, cg, cb), 2, cv.LINE_AA);
+      const label = `FACE ${face.score.toFixed(2)}`;
+      const tagY = fy > 20 ? fy - 20 : fy;
+      cv.rectangle(
+        rgb,
+        new cv.Point(fx, tagY),
+        new cv.Point(Math.min(rgb.cols - 1, fx + label.length * 8 + 10), tagY + 18),
+        new cv.Scalar(cr, cg, cb),
+        -1
+      );
+      cv.putText(
+        rgb,
+        label,
+        new cv.Point(fx + 4, tagY + 13),
+        cv.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        new cv.Scalar(11, 13, 16),
+        1,
+        cv.LINE_AA
+      );
+    }
+
+    return matToImageData(cv, rgb);
+  } finally {
+    rgb.delete();
+  }
+}
+
+async function applyFaceLandmarks(
+  cv: any,
+  src: ImageData,
+  showMesh = true,
+  pointRadius = 3,
+  landmarkColor = '#38BDF8'
+): Promise<ImageData> {
+  const rgb = imageDataToRgbMat(cv, src);
+  const [cr, cg, cb] = hexToRgb(landmarkColor);
+  try {
+    const faces = await detectFacesWithOpenCV(cv, rgb, 0.45);
+    for (const face of faces) {
+      const chin: [number, number] = [
+        (face.mouthRight[0] + face.mouthLeft[0]) * 0.5,
+        Math.min(rgb.rows - 4, face.y + face.h * 0.94),
+      ];
+      const pts: Array<[number, number]> = [
+        face.rightEye,
+        face.leftEye,
+        face.nose,
+        face.mouthRight,
+        face.mouthLeft,
+        chin,
+      ];
+
+      if (showMesh) {
+        const meshCol = new cv.Scalar(240, 246, 252);
+        const p = (pt: [number, number]) => new cv.Point(Math.round(pt[0]), Math.round(pt[1]));
+        cv.line(rgb, p(face.rightEye), p(face.leftEye), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.rightEye), p(face.nose), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.leftEye), p(face.nose), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.nose), p(face.mouthRight), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.nose), p(face.mouthLeft), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.mouthRight), p(face.mouthLeft), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.mouthRight), p(chin), meshCol, 1, cv.LINE_AA);
+        cv.line(rgb, p(face.mouthLeft), p(chin), meshCol, 1, cv.LINE_AA);
+      }
+
+      const rad = Math.max(2, Math.round(pointRadius));
+      for (const [px, py] of pts) {
+        const center = new cv.Point(Math.round(px), Math.round(py));
+        cv.circle(rgb, center, rad + 1, new cv.Scalar(11, 13, 16), -1, cv.LINE_AA);
+        cv.circle(rgb, center, rad, new cv.Scalar(cr, cg, cb), -1, cv.LINE_AA);
+      }
+    }
+    return matToImageData(cv, rgb);
+  } finally {
+    rgb.delete();
+  }
+}
+
+function applySkinMask(
+  cv: any,
+  src: ImageData,
+  crMin = 133,
+  crMax = 175,
+  cbMin = 77,
+  cbMax = 127,
+  outputMode = 'mask'
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const ycrcb = new cv.Mat();
+  const low = new cv.Mat(rgb.rows, rgb.cols, rgb.type(), new cv.Scalar(40, crMin, cbMin));
+  const high = new cv.Mat(rgb.rows, rgb.cols, rgb.type(), new cv.Scalar(255, crMax, cbMax));
+  const mask = new cv.Mat();
+  const dimmed = new cv.Mat();
+  try {
+    cv.cvtColor(rgb, ycrcb, cv.COLOR_RGB2YCrCb);
+    cv.inRange(ycrcb, low, high, mask);
+    if (outputMode === 'overlay') {
+      rgb.convertTo(dimmed, -1, 0.2, 0);
+      rgb.copyTo(dimmed, mask);
+      return matToImageData(cv, dimmed);
+    }
+    return matToImageData(cv, mask);
+  } finally {
+    rgb.delete();
+    ycrcb.delete();
+    low.delete();
+    high.delete();
+    mask.delete();
+    dimmed.delete();
+  }
+}
+
+// ============================================================================
+// OPENCV ML MODULE (cv.kmeans, cv.eigen + cv.gemm, cv.Mat CV_32F SVM kernel)
+// ============================================================================
+
+function applyKMeansQuantize(
+  cv: any,
+  src: ImageData,
+  k = 5,
+  attempts = 6,
+  showPalette = true
+): ImageData {
+  const { width: w, height: h } = src;
+  const clusters = Math.max(2, Math.min(16, Math.round(k)));
+  const maxIter = Math.max(2, Math.min(15, Math.round(attempts)));
+  const nPix = w * h;
+
+  const rgb = imageDataToRgbMat(cv, src);
+  const f32 = new cv.Mat();
+  const samples = new cv.Mat(nPix, 3, cv.CV_32F);
+  const labels = new cv.Mat();
+  const centers = new cv.Mat();
+  const outRgb = new cv.Mat(h, w, cv.CV_8UC3);
+
+  try {
+    rgb.convertTo(f32, cv.CV_32F);
+    samples.data32F.set(f32.data32F);
+    const crit = new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, maxIter, 1.0);
+    cv.kmeans(samples, clusters, labels, crit, 1, cv.KMEANS_PP_CENTERS, centers);
+
+    const lblData = labels.data32S;
+    const ctrData = centers.data32F;
+    const outData = outRgb.data;
+    for (let p = 0; p < nPix; p++) {
+      const cIdx = lblData[p] * 3;
+      const oIdx = p * 3;
+      outData[oIdx] = Math.min(255, Math.max(0, Math.round(ctrData[cIdx])));
+      outData[oIdx + 1] = Math.min(255, Math.max(0, Math.round(ctrData[cIdx + 1])));
+      outData[oIdx + 2] = Math.min(255, Math.max(0, Math.round(ctrData[cIdx + 2])));
+    }
+
+    if (showPalette) {
+      const stripH = 14;
+      const bw = w / clusters;
+      for (let c = 0; c < clusters; c++) {
+        const cr = Math.min(255, Math.max(0, Math.round(ctrData[c * 3])));
+        const cg = Math.min(255, Math.max(0, Math.round(ctrData[c * 3 + 1])));
+        const cb = Math.min(255, Math.max(0, Math.round(ctrData[c * 3 + 2])));
+        cv.rectangle(
+          outRgb,
+          new cv.Point(Math.round(c * bw), Math.max(0, h - stripH)),
+          new cv.Point(Math.min(w - 1, Math.round((c + 1) * bw)), h - 1),
+          new cv.Scalar(cr, cg, cb),
+          -1
+        );
+      }
+    }
+
+    return matToImageData(cv, outRgb);
+  } finally {
+    rgb.delete();
+    f32.delete();
+    samples.delete();
+    labels.delete();
+    centers.delete();
+    outRgb.delete();
+  }
+}
+
+function applySVMClassifier(
+  cv: any,
+  src: ImageData,
+  kernel = 'rbf',
+  targetClass = 'warm_skin_tones',
+  viewMode = 'overlay',
+  cParam = 1.5
+): ImageData {
+  const { width: w, height: h } = src;
+  const sharpness = Math.max(0.4, cParam * 1.1);
+
+  const rgb = imageDataToRgbMat(cv, src);
+  const fRgb = new cv.Mat();
+  const hsv = new cv.Mat();
+  const fHsv = new cv.Mat();
+  const rgbP = new cv.MatVector();
+  const hsvP = new cv.MatVector();
+  const rawMargin = new cv.Mat(h, w, cv.CV_32FC1);
+  const score = new cv.Mat(h, w, cv.CV_32FC1);
+  const tmp1 = new cv.Mat();
+  const tmp2 = new cv.Mat();
+  const ones = new cv.Mat(h, w, cv.CV_32FC1, new cv.Scalar(1.0));
+  const zeros = new cv.Mat(h, w, cv.CV_32FC1, new cv.Scalar(0.0));
+
+  try {
+    rgb.convertTo(fRgb, cv.CV_32FC3, 1 / 255);
+    cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+    hsv.convertTo(fHsv, cv.CV_32FC3, 1 / 255);
+
+    cv.split(fRgb, rgbP);
+    cv.split(fHsv, hsvP);
+    const R = rgbP.get(0);
+    const G = rgbP.get(1);
+    const B = rgbP.get(2);
+    const S = hsvP.get(1);
+    const V = hsvP.get(2);
+
+    if (targetClass === 'salient_lum') {
+      const gray = new cv.Mat();
+      const fGray = new cv.Mat();
+      cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+      gray.convertTo(fGray, cv.CV_32FC1, 1 / 255);
+      fGray.convertTo(rawMargin, cv.CV_32FC1, 2.4, -0.48 * 2.4);
+      gray.delete();
+      fGray.delete();
+    } else if (targetClass === 'high_sat') {
+      cv.addWeighted(S, 2.6, V, 0.4, -1.068, rawMargin);
+    } else {
+      // (R - B)*1.85 + (R - G)*0.95 + (V - 0.3)*0.35 - 0.28
+      const rSubB = new cv.Mat();
+      const rSubG = new cv.Mat();
+      cv.subtract(R, B, rSubB);
+      cv.subtract(R, G, rSubG);
+      cv.addWeighted(rSubB, 1.85, rSubG, 0.95, 0, tmp1);
+      cv.addWeighted(tmp1, 1.0, V, 0.35, -0.385, rawMargin);
+      rSubB.delete();
+      rSubG.delete();
+    }
+
+    if (kernel === 'linear') {
+      rawMargin.convertTo(tmp1, cv.CV_32FC1, sharpness * 0.5, 0.5);
+      cv.max(tmp1, zeros, tmp2);
+      cv.min(tmp2, ones, score);
+    } else if (kernel === 'poly') {
+      // Polynomial-steepened sigmoid via cv.pow & cv.exp
+      const sq = new cv.Mat();
+      const mag = new cv.Mat();
+      const posMask = new cv.Mat();
+      const signF = new cv.Mat();
+      cv.multiply(rawMargin, rawMargin, sq);
+      cv.pow(sq, 0.7, mag);
+      cv.threshold(rawMargin, posMask, 0, 2, cv.THRESH_BINARY);
+      posMask.convertTo(signF, cv.CV_32FC1, 1, -1);
+      cv.multiply(mag, signF, tmp1);
+      tmp1.convertTo(tmp2, cv.CV_32FC1, -sharpness * 2.5, 0);
+      cv.exp(tmp2, tmp1);
+      cv.add(tmp1, ones, tmp2);
+      cv.divide(ones, tmp2, score);
+      sq.delete();
+      mag.delete();
+      posMask.delete();
+      signF.delete();
+    } else {
+      rawMargin.convertTo(tmp1, cv.CV_32FC1, -sharpness * 2.8, 0);
+      cv.exp(tmp1, tmp2);
+      cv.add(tmp2, ones, tmp1);
+      cv.divide(ones, tmp1, score);
+    }
+
+    R.delete();
+    G.delete();
+    B.delete();
+    S.delete();
+    V.delete();
+
+    if (viewMode === 'mask') {
+      const binF = new cv.Mat();
+      const binU8 = new cv.Mat();
+      cv.threshold(score, binF, 0.5, 255, cv.THRESH_BINARY);
+      binF.convertTo(binU8, cv.CV_8UC1);
+      const img = matToImageData(cv, binU8);
+      binF.delete();
+      binU8.delete();
+      return img;
+    }
+
+    if (viewMode === 'heatmap') {
+      const scoreU8 = new cv.Mat();
+      const cmBgr = new cv.Mat();
+      const rgbaOut = new cv.Mat();
+      score.convertTo(scoreU8, cv.CV_8UC1, 255);
+      cv.applyColorMap(scoreU8, cmBgr, cv.COLORMAP_TURBO);
+      cv.cvtColor(cmBgr, rgbaOut, cv.COLOR_BGR2RGBA);
+      const img = matToImageData(cv, rgbaOut);
+      scoreU8.delete();
+      cmBgr.delete();
+      rgbaOut.delete();
+      return img;
+    }
+
+    const maskF = new cv.Mat();
+    const maskU8 = new cv.Mat();
+    const dimmed = new cv.Mat();
+    const highlighted = new cv.Mat();
+    cv.threshold(score, maskF, 0.5, 255, cv.THRESH_BINARY);
+    maskF.convertTo(maskU8, cv.CV_8UC1);
+    rgb.convertTo(dimmed, -1, 0.28, 0);
+    rgb.convertTo(highlighted, -1, 0.9, 28);
+    highlighted.copyTo(dimmed, maskU8);
+    const img = matToImageData(cv, dimmed);
+    maskF.delete();
+    maskU8.delete();
+    dimmed.delete();
+    highlighted.delete();
+    return img;
+  } finally {
+    rgb.delete();
+    fRgb.delete();
+    hsv.delete();
+    fHsv.delete();
+    rgbP.delete();
+    hsvP.delete();
+    rawMargin.delete();
+    score.delete();
+    tmp1.delete();
+    tmp2.delete();
+    ones.delete();
+    zeros.delete();
+  }
+}
+
+function applyKNNMeanShift(
+  cv: any,
+  src: ImageData,
+  spatialRadius = 4,
+  colorRadius = 38
+): ImageData {
+  // Real spatial-color segmentation in OpenCV using cv.bilateralFilter + 5D spatial-color cv.kmeans
+  const rgb = imageDataToRgbMat(cv, src);
+  const smooth = new cv.Mat();
+  const small = new cv.Mat();
+  const labels = new cv.Mat();
+  const centers = new cv.Mat();
+  const clusteredSmall = new cv.Mat();
+  const outRgb = new cv.Mat();
+
+  try {
+    const d = Math.max(3, Math.min(9, Math.round(spatialRadius) * 2 - 1));
+    cv.bilateralFilter(rgb, smooth, d, colorRadius * 1.4, spatialRadius * 8, cv.BORDER_DEFAULT);
+
+    // Downscale 0.5x for rapid 5D (x, y, R, G, B) cv.kmeans clustering, then upscale + refine
+    const sw = Math.max(32, Math.round(src.width * 0.5));
+    const sh = Math.max(32, Math.round(src.height * 0.5));
+    cv.resize(smooth, small, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+
+    const n = sw * sh;
+    const samples5D = new cv.Mat(n, 5, cv.CV_32F);
+    const spatialScale = Math.max(12, 90 - colorRadius) / Math.max(sw, sh);
+    const sData = samples5D.data32F;
+    const pData = small.data;
+
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const p = y * sw + x;
+        const p3 = p * 3;
+        const p5 = p * 5;
+        sData[p5] = pData[p3];
+        sData[p5 + 1] = pData[p3 + 1];
+        sData[p5 + 2] = pData[p3 + 2];
+        sData[p5 + 3] = x * spatialScale;
+        sData[p5 + 4] = y * spatialScale;
+      }
+    }
+
+    const k = Math.max(6, Math.min(20, Math.round(28 - colorRadius * 0.22)));
+    const crit = new cv.TermCriteria(cv.TermCriteria_EPS + cv.TermCriteria_MAX_ITER, 6, 1.0);
+    cv.kmeans(samples5D, k, labels, crit, 1, cv.KMEANS_PP_CENTERS, centers);
+
+    clusteredSmall.create(sh, sw, cv.CV_8UC3);
+    const lblD = labels.data32S;
+    const ctrD = centers.data32F;
+    const csD = clusteredSmall.data;
+    for (let p = 0; p < n; p++) {
+      const cOff = lblD[p] * 5;
+      const oOff = p * 3;
+      csD[oOff] = Math.min(255, Math.max(0, Math.round(ctrD[cOff])));
+      csD[oOff + 1] = Math.min(255, Math.max(0, Math.round(ctrD[cOff + 1])));
+      csD[oOff + 2] = Math.min(255, Math.max(0, Math.round(ctrD[cOff + 2])));
+    }
+
+    cv.resize(clusteredSmall, outRgb, new cv.Size(src.width, src.height), 0, 0, cv.INTER_LINEAR);
+    samples5D.delete();
+    return matToImageData(cv, outRgb);
+  } finally {
+    rgb.delete();
+    smooth.delete();
+    small.delete();
+    labels.delete();
+    centers.delete();
+    clusteredSmall.delete();
+    outRgb.delete();
+  }
+}
+
+function applyPCAEigen(cv: any, src: ImageData, components = 1, mode = 'reconstruct'): ImageData {
+  const { width: w, height: h } = src;
+  const nPix = w * h;
+  const keep = Math.max(1, Math.min(3, Math.round(components)));
+
+  const rgb = imageDataToRgbMat(cv, src);
+  const fRgb = new cv.Mat();
+  const meanTuple = cv.mean(rgb);
+  const meanMat = new cv.Mat(h, w, cv.CV_32FC3, new cv.Scalar(meanTuple[0], meanTuple[1], meanTuple[2]));
+  const centered = new cv.Mat();
+  const X = new cv.Mat(nPix, 3, cv.CV_32F);
+  const empty = new cv.Mat();
+  const cov = new cv.Mat();
+  const evals = new cv.Mat();
+  const evecs = new cv.Mat();
+  const proj = new cv.Mat();
+  const recon = new cv.Mat();
+  const reconGrid = new cv.Mat(h, w, cv.CV_32FC3);
+  const shifted = new cv.Mat();
+  const outU8 = new cv.Mat();
+
+  try {
+    rgb.convertTo(fRgb, cv.CV_32FC3);
+    cv.subtract(fRgb, meanMat, centered);
+    X.data32F.set(centered.data32F);
+
+    cv.gemm(X, X, 1 / nPix, empty, 0, cov, cv.GEMM_1_T);
+    cv.eigen(cov, evals, evecs);
+
+    // Project samples onto eigenvectors: proj = X * evecs^T (N x 3)
+    cv.gemm(X, evecs, 1, empty, 0, proj, cv.GEMM_2_T);
+
+    if (mode === 'pc1' || mode === 'pc2') {
+      const pcIdx = mode === 'pc2' ? 1 : 0;
+      const gain = mode === 'pc2' ? 1.4 : 0.85;
+      const grayF = new cv.Mat(h, w, cv.CV_32FC1);
+      const pD = proj.data32F;
+      const gD = grayF.data32F;
+      for (let i = 0; i < nPix; i++) {
+        gD[i] = Math.min(255, Math.max(0, 128 + pD[i * 3 + pcIdx] * gain));
+      }
+      grayF.convertTo(outU8, cv.CV_8UC1);
+      grayF.delete();
+      return matToImageData(cv, outU8);
+    }
+
+    // Zero out principal components >= keep before reconstruction
+    if (keep < 3) {
+      const pD = proj.data32F;
+      for (let i = 0; i < nPix; i++) {
+        const base = i * 3;
+        if (keep < 2) pD[base + 1] = 0;
+        if (keep < 3) pD[base + 2] = 0;
+      }
+    }
+
+    cv.gemm(proj, evecs, 1, empty, 0, recon, 0);
+    reconGrid.data32F.set(recon.data32F);
+    cv.add(reconGrid, meanMat, shifted);
+    shifted.convertTo(outU8, cv.CV_8UC3);
+    return matToImageData(cv, outU8);
+  } finally {
+    rgb.delete();
+    fRgb.delete();
+    meanMat.delete();
+    centered.delete();
+    X.delete();
+    empty.delete();
+    cov.delete();
+    evals.delete();
+    evecs.delete();
+    proj.delete();
+    recon.delete();
+    reconGrid.delete();
+    shifted.delete();
+    outU8.delete();
+  }
+}
+
+// ============================================================================
+// OPENCV OSD DRAWING (100% window.cv)
+// ============================================================================
 
 export function renderOSDElementsToImageData(
   baseImg: ImageData,
@@ -1217,203 +1812,154 @@ export function renderOSDElementsToImageData(
   globalOpacity = 1.0,
   showGridBurnIn = false
 ): ImageData {
+  const cv = getCv();
   const w = baseImg.width;
   const h = baseImg.height;
+  const baseMat = cv.matFromImageData(baseImg);
+  const overlayMat = baseMat.clone();
 
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d')!;
-  ctx.putImageData(baseImg, 0, 0);
-
-  if (showGridBurnIn) {
-    ctx.save();
-    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
-    ctx.lineWidth = 1.25;
-    const m = 12;
-    const len = 18;
-    ctx.beginPath();
-    ctx.moveTo(m, m + len);
-    ctx.lineTo(m, m);
-    ctx.lineTo(m + len, m);
-    ctx.moveTo(w - m - len, m);
-    ctx.lineTo(w - m, m);
-    ctx.lineTo(w - m, m + len);
-    ctx.moveTo(m, h - m - len);
-    ctx.lineTo(m, h - m);
-    ctx.lineTo(m + len, h - m);
-    ctx.moveTo(w - m - len, h - m);
-    ctx.lineTo(w - m, h - m);
-    ctx.lineTo(w - m, h - m - len);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (isOpenCVWasmReady()) {
-    try {
-      const cv = window.cv;
-      const baseMat = cv.matFromImageData(ctx.getImageData(0, 0, w, h));
-      for (const el of elements) {
-        if (!el.visible) continue;
-        const [r, g, b] = hexToRgb(el.color || '#22C55E');
-        const col = new cv.Scalar(r, g, b, Math.round(255 * (el.opacity ?? 1) * globalOpacity));
-        const thickness = el.filled ? -1 : Math.max(1, Math.round(el.thickness || 2));
-        const px = Math.round(el.x * w);
-        const py = Math.round(el.y * h);
-        const pw = Math.round(el.width * w);
-        const ph = Math.round(el.height * h);
-
-        if (el.kind === 'rect') {
-          cv.rectangle(baseMat, new cv.Point(px, py), new cv.Point(px + pw, py + ph), col, thickness, cv.LINE_AA);
-        } else if (el.kind === 'bbox_label') {
-          cv.rectangle(baseMat, new cv.Point(px, py), new cv.Point(px + pw, py + ph), col, Math.max(1, Math.round(el.thickness || 2)), cv.LINE_AA);
-          const label = el.text || 'OBJECT';
-          const fScale = el.fontScale ?? 0.5;
-          const tagH = Math.max(18, Math.round(22 * fScale * 1.4));
-          cv.rectangle(baseMat, new cv.Point(px, Math.max(0, py - tagH)), new cv.Point(px + Math.min(pw, label.length * 9 + 14), py), col, -1);
-          cv.putText(
-            baseMat,
-            label,
-            new cv.Point(px + 5, Math.max(12, py - 5)),
-            cv.FONT_HERSHEY_SIMPLEX,
-            fScale,
-            new cv.Scalar(11, 13, 16, 255),
-            1,
-            cv.LINE_AA
-          );
-        } else if (el.kind === 'circle') {
-          const rad = Math.max(4, Math.round(Math.min(pw, ph) / 2));
-          cv.circle(baseMat, new cv.Point(px + Math.round(pw / 2), py + Math.round(ph / 2)), rad, col, thickness, cv.LINE_AA);
-        } else if (el.kind === 'line') {
-          const x2 = Math.round((el.x2 ?? el.x + el.width) * w);
-          const y2 = Math.round((el.y2 ?? el.y + el.height) * h);
-          cv.line(baseMat, new cv.Point(px, py), new cv.Point(x2, y2), col, Math.max(1, Math.round(el.thickness || 2)), cv.LINE_AA);
-        } else if (el.kind === 'arrow') {
-          const x2 = Math.round((el.x2 ?? el.x + el.width) * w);
-          const y2 = Math.round((el.y2 ?? el.y + el.height) * h);
-          cv.arrowedLine(baseMat, new cv.Point(px, py), new cv.Point(x2, y2), col, Math.max(1, Math.round(el.thickness || 2)), cv.LINE_AA, 0, 0.22);
-        } else if (el.kind === 'text') {
-          cv.putText(
-            baseMat,
-            el.text || 'OSD TEXT',
-            new cv.Point(px, py + Math.round(14 * (el.fontScale ?? 0.55) * 1.5)),
-            cv.FONT_HERSHEY_SIMPLEX,
-            el.fontScale ?? 0.55,
-            col,
-            Math.max(1, Math.round(el.thickness || 1.5)),
-            cv.LINE_AA
-          );
-        } else if (el.kind === 'reticle') {
-          const rad = Math.max(8, Math.round(Math.min(pw, ph) / 2));
-          cv.circle(baseMat, new cv.Point(px, py), rad, col, Math.max(1, Math.round(el.thickness || 1.5)), cv.LINE_AA);
-          cv.line(baseMat, new cv.Point(px - rad - 8, py), new cv.Point(px - 4, py), col, 1, cv.LINE_AA);
-          cv.line(baseMat, new cv.Point(px + 4, py), new cv.Point(px + rad + 8, py), col, 1, cv.LINE_AA);
-          cv.line(baseMat, new cv.Point(px, py - rad - 8), new cv.Point(px, py - 4), col, 1, cv.LINE_AA);
-          cv.line(baseMat, new cv.Point(px, py + 4), new cv.Point(px, py + rad + 8), col, 1, cv.LINE_AA);
-        }
-      }
-      const out = new ImageData(new Uint8ClampedArray(baseMat.data), baseMat.cols, baseMat.rows);
-      baseMat.delete();
-      return out;
-    } catch {
-      // Fallback below
-    }
-  }
-
-  for (const el of elements) {
-    if (!el.visible) continue;
-    ctx.save();
-    ctx.globalAlpha = Math.max(0.05, Math.min(1, (el.opacity ?? 1) * globalOpacity));
-    ctx.strokeStyle = el.color || '#22C55E';
-    ctx.fillStyle = el.color || '#22C55E';
-    ctx.lineWidth = Math.max(1, el.thickness || 2);
-
-    const px = el.x * w;
-    const py = el.y * h;
-    const pw = el.width * w;
-    const ph = el.height * h;
-
-    if (el.kind === 'rect') {
-      if (el.filled) {
-        ctx.globalAlpha *= 0.35;
-        ctx.fillRect(px, py, pw, ph);
-        ctx.globalAlpha = Math.max(0.05, Math.min(1, (el.opacity ?? 1) * globalOpacity));
-      }
-      ctx.strokeRect(px, py, pw, ph);
-    } else if (el.kind === 'bbox_label') {
-      ctx.strokeRect(px, py, pw, ph);
-      const label = el.text || 'OBJECT';
-      const fontSize = Math.max(10, Math.round(20 * (el.fontScale ?? 0.52)));
-      ctx.font = `600 ${fontSize}px "JetBrains Mono", monospace`;
-      const textWidth = ctx.measureText(label).width;
-      const tagW = textWidth + 10;
-      const tagH = fontSize + 6;
-      const tagY = py - tagH >= 0 ? py - tagH : py;
-      ctx.fillRect(px, tagY, tagW, tagH);
-      ctx.fillStyle = '#0B0D10';
-      ctx.fillText(label, px + 5, tagY + fontSize);
-    } else if (el.kind === 'circle') {
-      const cx = px + pw / 2;
-      const cy = py + ph / 2;
-      const rad = Math.max(4, Math.min(pw, ph) / 2);
-      ctx.beginPath();
-      ctx.arc(cx, cy, rad, 0, Math.PI * 2);
-      if (el.filled) {
-        ctx.globalAlpha *= 0.35;
-        ctx.fill();
-        ctx.globalAlpha = Math.max(0.05, Math.min(1, (el.opacity ?? 1) * globalOpacity));
-      }
-      ctx.stroke();
-    } else if (el.kind === 'line') {
-      const x2 = (el.x2 ?? el.x + el.width) * w;
-      const y2 = (el.y2 ?? el.y + el.height) * h;
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-    } else if (el.kind === 'arrow') {
-      const x2 = (el.x2 ?? el.x + el.width) * w;
-      const y2 = (el.y2 ?? el.y + el.height) * h;
-      const angle = Math.atan2(y2 - py, x2 - px);
-      const headLen = Math.max(8, (el.thickness || 2) * 5);
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(x2, y2);
-      ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
-      ctx.moveTo(x2, y2);
-      ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
-      ctx.stroke();
-    } else if (el.kind === 'text') {
-      const fontSize = Math.max(11, Math.round(24 * (el.fontScale ?? 0.5)));
-      ctx.font = `600 ${fontSize}px "JetBrains Mono", monospace`;
-      const txt = el.text || 'OSD TEXT';
-      const tw = ctx.measureText(txt).width;
-      ctx.fillStyle = 'rgba(11, 13, 16, 0.58)';
-      ctx.fillRect(px - 4, py - 2, tw + 8, fontSize + 7);
-      ctx.fillStyle = el.color || '#F8FAFC';
-      ctx.fillText(txt, px, py + fontSize);
-    } else if (el.kind === 'reticle') {
-      const rad = Math.max(10, Math.min(pw, ph) / 2);
-      ctx.beginPath();
-      ctx.arc(px, py, rad, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(px - rad - 10, py);
-      ctx.lineTo(px - 5, py);
-      ctx.moveTo(px + 5, py);
-      ctx.lineTo(px + rad + 10, py);
-      ctx.moveTo(px, py - rad - 10);
-      ctx.lineTo(px, py - 5);
-      ctx.moveTo(px, py + 5);
-      ctx.lineTo(px, py + rad + 10);
-      ctx.stroke();
+  try {
+    if (showGridBurnIn) {
+      const m = 12;
+      const len = 18;
+      const cCol = new cv.Scalar(240, 246, 252, 160);
+      cv.line(overlayMat, new cv.Point(m, m + len), new cv.Point(m, m), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(m, m), new cv.Point(m + len, m), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(w - m - len, m), new cv.Point(w - m, m), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(w - m, m), new cv.Point(w - m, m + len), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(m, h - m - len), new cv.Point(m, h - m), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(m, h - m), new cv.Point(m + len, h - m), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(w - m - len, h - m), new cv.Point(w - m, h - m), cCol, 1, cv.LINE_AA);
+      cv.line(overlayMat, new cv.Point(w - m, h - m), new cv.Point(w - m, h - m - len), cCol, 1, cv.LINE_AA);
     }
 
-    ctx.restore();
-  }
+    for (const el of elements) {
+      if (!el.visible) continue;
+      const [r, g, b] = hexToRgb(el.color || '#22C55E');
+      const alphaScalar = Math.round(255 * Math.max(0.05, Math.min(1, (el.opacity ?? 1) * globalOpacity)));
+      const col = new cv.Scalar(r, g, b, alphaScalar);
+      const thickness = el.filled ? -1 : Math.max(1, Math.round(el.thickness || 2));
+      const px = Math.round(el.x * w);
+      const py = Math.round(el.y * h);
+      const pw = Math.round(el.width * w);
+      const ph = Math.round(el.height * h);
 
-  return ctx.getImageData(0, 0, w, h);
+      if (el.kind === 'rect') {
+        cv.rectangle(overlayMat, new cv.Point(px, py), new cv.Point(px + pw, py + ph), col, thickness, cv.LINE_AA);
+      } else if (el.kind === 'bbox_label') {
+        cv.rectangle(
+          overlayMat,
+          new cv.Point(px, py),
+          new cv.Point(px + pw, py + ph),
+          col,
+          Math.max(1, Math.round(el.thickness || 2)),
+          cv.LINE_AA
+        );
+        const label = el.text || 'OBJECT';
+        const fScale = el.fontScale ?? 0.5;
+        const tagH = Math.max(18, Math.round(22 * fScale * 1.4));
+        cv.rectangle(
+          overlayMat,
+          new cv.Point(px, Math.max(0, py - tagH)),
+          new cv.Point(Math.min(w - 1, px + Math.max(pw * 0.45, label.length * 9 + 14)), py),
+          col,
+          -1
+        );
+        cv.putText(
+          overlayMat,
+          label,
+          new cv.Point(px + 5, Math.max(12, py - 5)),
+          cv.FONT_HERSHEY_SIMPLEX,
+          fScale,
+          new cv.Scalar(11, 13, 16, 255),
+          1,
+          cv.LINE_AA
+        );
+      } else if (el.kind === 'circle') {
+        const rad = Math.max(4, Math.round(Math.min(pw, ph) / 2));
+        cv.circle(
+          overlayMat,
+          new cv.Point(px + Math.round(pw / 2), py + Math.round(ph / 2)),
+          rad,
+          col,
+          thickness,
+          cv.LINE_AA
+        );
+      } else if (el.kind === 'line') {
+        const x2 = Math.round((el.x2 ?? el.x + el.width) * w);
+        const y2 = Math.round((el.y2 ?? el.y + el.height) * h);
+        cv.line(
+          overlayMat,
+          new cv.Point(px, py),
+          new cv.Point(x2, y2),
+          col,
+          Math.max(1, Math.round(el.thickness || 2)),
+          cv.LINE_AA
+        );
+      } else if (el.kind === 'arrow') {
+        const x2 = Math.round((el.x2 ?? el.x + el.width) * w);
+        const y2 = Math.round((el.y2 ?? el.y + el.height) * h);
+        cv.arrowedLine(
+          overlayMat,
+          new cv.Point(px, py),
+          new cv.Point(x2, y2),
+          col,
+          Math.max(1, Math.round(el.thickness || 2)),
+          cv.LINE_AA,
+          0,
+          0.22
+        );
+      } else if (el.kind === 'text') {
+        const fScale = el.fontScale ?? 0.55;
+        const txt = el.text || 'OSD TEXT';
+        const tw = Math.round(txt.length * 14 * fScale);
+        const th = Math.round(26 * fScale);
+        cv.rectangle(
+          overlayMat,
+          new cv.Point(Math.max(0, px - 4), Math.max(0, py)),
+          new cv.Point(Math.min(w - 1, px + tw + 8), Math.min(h - 1, py + th + 10)),
+          new cv.Scalar(11, 13, 16, 200),
+          -1
+        );
+        cv.putText(
+          overlayMat,
+          txt,
+          new cv.Point(px, py + Math.round(22 * fScale)),
+          cv.FONT_HERSHEY_SIMPLEX,
+          fScale,
+          col,
+          Math.max(1, Math.round(el.thickness || 1.5)),
+          cv.LINE_AA
+        );
+      } else if (el.kind === 'reticle') {
+        const rad = Math.max(8, Math.round(Math.min(pw, ph) / 2));
+        cv.circle(overlayMat, new cv.Point(px, py), rad, col, Math.max(1, Math.round(el.thickness || 1.5)), cv.LINE_AA);
+        cv.line(overlayMat, new cv.Point(px - rad - 8, py), new cv.Point(px - 4, py), col, 1, cv.LINE_AA);
+        cv.line(overlayMat, new cv.Point(px + 4, py), new cv.Point(px + rad + 8, py), col, 1, cv.LINE_AA);
+        cv.line(overlayMat, new cv.Point(px, py - rad - 8), new cv.Point(px, py - 4), col, 1, cv.LINE_AA);
+        cv.line(overlayMat, new cv.Point(px, py + 4), new cv.Point(px, py + rad + 8), col, 1, cv.LINE_AA);
+      }
+    }
+
+    const alphaMix = Math.max(0.1, Math.min(1, globalOpacity));
+    if (alphaMix < 0.99) {
+      const blended = new cv.Mat();
+      cv.addWeighted(overlayMat, alphaMix, baseMat, 1 - alphaMix, 0, blended);
+      const img = matToImageData(cv, blended);
+      blended.delete();
+      return img;
+    }
+
+    return matToImageData(cv, overlayMat);
+  } finally {
+    baseMat.delete();
+    overlayMat.delete();
+  }
 }
+
+// ============================================================================
+// PIPELINE SCHEDULER & EXECUTION
+// ============================================================================
 
 function getTopologicalOrder(
   nodes: PipelineNode[],
@@ -1504,8 +2050,11 @@ export async function executePipeline(options: {
   const logs: ExecutionLogEntry[] = [];
   let totalMs = 0;
 
-  // Ensure default Lena portrait sample is ready before processing
-  const defaultLena = await getSampleImageDataAsync('portrait');
+  // Ensure OpenCV.js WASM and default Lena sample are loaded before running any node
+  const [cv, defaultLena] = await Promise.all([
+    ensureOpenCVReady(),
+    getSampleImageDataAsync('portrait'),
+  ]);
 
   const incomingEdgesByNode = new Map<string, PipelineEdge[]>();
   edges.forEach((e) => {
@@ -1519,7 +2068,7 @@ export async function executePipeline(options: {
     const opName = node.type;
     logs.push({
       id: `${node.id}-start-${Date.now()}-${Math.random()}`,
-      message: `Executing ${opName}`,
+      message: `Executing ${opName} [cv.Mat]`,
       kind: 'info',
       timestamp: Date.now(),
     });
@@ -1567,170 +2116,87 @@ export async function executePipeline(options: {
 
     if (node.type === 'load_image') {
       const customUrl = String(node.params.customDataUrl || '');
+      let rawImg: ImageData;
       if (customUrl) {
         try {
-          outImage = await loadImageDataFromDataUrl(customUrl);
+          rawImg = await loadImageDataFromDataUrl(customUrl);
         } catch {
-          outImage = await getSampleImageDataAsync(String(node.params.sampleId || 'portrait'));
+          rawImg = await getSampleImageDataAsync(String(node.params.sampleId || 'portrait'));
         }
       } else {
-        outImage = await getSampleImageDataAsync(String(node.params.sampleId || 'portrait'));
+        rawImg = await getSampleImageDataAsync(String(node.params.sampleId || 'portrait'));
       }
+      // Marshal through cv.matFromImageData -> cv.Mat
+      outImage = cloneImageDataViaCv(cv, rawImg);
     } else {
       const primaryInput =
         inputMap.image || inputMap.a || inputMap.mask || Object.values(inputMap).find(Boolean) || defaultLena;
 
       switch (node.type) {
         case 'clahe':
-        case 'albu_clahe': {
-          const clip = Number(node.params.clipLimit ?? 2.5);
-          const grid = Number(node.params.tileGridSize ?? 8);
-          outImage = applyCLAHE(primaryInput, clip, grid);
+        case 'albu_clahe':
+          outImage = applyCLAHE(
+            cv,
+            primaryInput,
+            Number(node.params.clipLimit ?? 2.5),
+            Number(node.params.tileGridSize ?? 8)
+          );
           break;
-        }
         case 'equalize_hist':
-          outImage = applyEqualizeHist(primaryInput, node.params.luminanceOnly !== false);
+          outImage = applyEqualizeHist(cv, primaryInput, node.params.luminanceOnly !== false);
           break;
-        case 'brightness_contrast': {
-          const bShift = Number(node.params.brightness ?? 15);
-          const cMult = Number(node.params.contrast ?? 1.15);
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0; i < primaryInput.data.length; i += 4) {
-            out[i] = Math.min(255, Math.max(0, Math.round((primaryInput.data[i] - 128) * cMult + 128 + bShift)));
-            out[i + 1] = Math.min(255, Math.max(0, Math.round((primaryInput.data[i + 1] - 128) * cMult + 128 + bShift)));
-            out[i + 2] = Math.min(255, Math.max(0, Math.round((primaryInput.data[i + 2] - 128) * cMult + 128 + bShift)));
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'brightness_contrast':
+          outImage = applyBrightnessContrast(
+            cv,
+            primaryInput,
+            Number(node.params.contrast ?? 1.15),
+            Number(node.params.brightness ?? 15)
+          );
           break;
-        }
-        case 'gaussian_noise': {
-          const sigma = Number(node.params.sigma ?? 22);
-          const rand = seededRandom(seed + 17);
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0; i < primaryInput.data.length; i += 4) {
-            const u1 = Math.max(1e-6, rand());
-            const u2 = rand();
-            const n = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * sigma;
-            out[i] = Math.min(255, Math.max(0, Math.round(primaryInput.data[i] + n)));
-            out[i + 1] = Math.min(255, Math.max(0, Math.round(primaryInput.data[i + 1] + n)));
-            out[i + 2] = Math.min(255, Math.max(0, Math.round(primaryInput.data[i + 2] + n)));
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'gaussian_noise':
+          outImage = applyGaussianNoise(cv, primaryInput, Number(node.params.sigma ?? 22), seed);
           break;
-        }
-        case 'random_crop_resize': {
-          const scale = Math.min(1, Math.max(0.35, Number(node.params.scale ?? 0.72)));
-          const rand = seededRandom(seed + 31);
-          const cw = Math.round(primaryInput.width * scale);
-          const ch = Math.round(primaryInput.height * scale);
-          const sx = Math.round(rand() * (primaryInput.width - cw));
-          const sy = Math.round(rand() * (primaryInput.height - ch));
-          const tmp = document.createElement('canvas');
-          tmp.width = primaryInput.width;
-          tmp.height = primaryInput.height;
-          tmp.getContext('2d')!.putImageData(primaryInput, 0, 0);
-          const dst = document.createElement('canvas');
-          dst.width = primaryInput.width;
-          dst.height = primaryInput.height;
-          dst.getContext('2d')!.drawImage(tmp, sx, sy, cw, ch, 0, 0, primaryInput.width, primaryInput.height);
-          outImage = dst.getContext('2d')!.getImageData(0, 0, primaryInput.width, primaryInput.height);
+        case 'random_crop_resize':
+          outImage = applyRandomCropResize(cv, primaryInput, Number(node.params.scale ?? 0.72), seed);
           break;
-        }
-        case 'channel_shuffle': {
-          const orderStr = String(node.params.order || 'bgr');
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          const mapIdx =
-            orderStr === 'grb'
-              ? [1, 0, 2]
-              : orderStr === 'brg'
-                ? [2, 0, 1]
-                : orderStr === 'rbg'
-                  ? [0, 2, 1]
-                  : [2, 1, 0];
-          for (let i = 0; i < primaryInput.data.length; i += 4) {
-            out[i] = primaryInput.data[i + mapIdx[0]];
-            out[i + 1] = primaryInput.data[i + mapIdx[1]];
-            out[i + 2] = primaryInput.data[i + mapIdx[2]];
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'channel_shuffle':
+          outImage = applyChannelShuffle(cv, primaryInput, String(node.params.order || 'bgr'));
           break;
-        }
-        case 'flip_rotate': {
-          const mode = String(node.params.mode || 'horizontal');
-          const c = document.createElement('canvas');
-          c.width = primaryInput.width;
-          c.height = primaryInput.height;
-          const ctx = c.getContext('2d')!;
-          const tmp = document.createElement('canvas');
-          tmp.width = primaryInput.width;
-          tmp.height = primaryInput.height;
-          tmp.getContext('2d')!.putImageData(primaryInput, 0, 0);
-          ctx.save();
-          if (mode === 'horizontal') {
-            ctx.translate(c.width, 0);
-            ctx.scale(-1, 1);
-          } else if (mode === 'vertical') {
-            ctx.translate(0, c.height);
-            ctx.scale(1, -1);
-          } else if (mode === 'rot90') {
-            ctx.translate(c.width / 2, c.height / 2);
-            ctx.rotate(Math.PI / 2);
-            ctx.translate(-c.width / 2, -c.height / 2);
-          } else {
-            ctx.translate(c.width / 2, c.height / 2);
-            ctx.rotate(Math.PI);
-            ctx.translate(-c.width / 2, -c.height / 2);
-          }
-          ctx.drawImage(tmp, 0, 0);
-          ctx.restore();
-          outImage = ctx.getImageData(0, 0, c.width, c.height);
+        case 'flip_rotate':
+          outImage = applyFlipRotate(cv, primaryInput, String(node.params.mode || 'horizontal'));
           break;
-        }
         case 'to_hsv':
-          outImage = applyToHSV(primaryInput, String(node.params.previewMode || 'hsv_channels'));
+          outImage = applyToHSV(cv, primaryInput, String(node.params.previewMode || 'hsv_channels'));
           break;
         case 'to_lab':
-          outImage = applyToLAB(primaryInput, String(node.params.channelView || 'composite'));
+          outImage = applyToLAB(cv, primaryInput, String(node.params.channelView || 'composite'));
           break;
         case 'colormap':
-          outImage = applyColorMap(primaryInput, String(node.params.palette || 'turbo'));
+          outImage = applyColorMap(cv, primaryInput, String(node.params.palette || 'turbo'));
           break;
-        case 'split_channel': {
-          const ch = String(node.params.channel || 'r');
-          const off = ch === 'g' ? 1 : ch === 'b' ? 2 : 0;
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0; i < out.length; i += 4) {
-            const v = primaryInput.data[i + off];
-            out[i] = out[i + 1] = out[i + 2] = v;
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'split_channel':
+          outImage = applySplitChannel(cv, primaryInput, String(node.params.channel || 'r'));
           break;
-        }
-        case 'to_grayscale': {
-          const gray = toGrayArray(primaryInput);
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0, p = 0; i < out.length; i += 4, p++) {
-            out[i] = out[i + 1] = out[i + 2] = gray[p];
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'to_grayscale':
+          outImage = applyToGrayscale(cv, primaryInput);
           break;
-        }
         case 'in_range':
-          outImage = applyInRange(primaryInput, node.params);
+          outImage = applyInRange(cv, primaryInput, node.params);
           break;
         case 'gaussian_blur':
-          outImage = applyGaussianBlur(primaryInput, Number(node.params.kernelSize ?? 5));
+          outImage = applyGaussianBlur(
+            cv,
+            primaryInput,
+            Number(node.params.kernelSize ?? 5),
+            Number(node.params.sigmaX ?? 1.4)
+          );
           break;
         case 'median_blur':
-          outImage = applyMedianBlur(primaryInput, Number(node.params.kernelSize ?? 5));
+          outImage = applyMedianBlur(cv, primaryInput, Number(node.params.kernelSize ?? 5));
           break;
         case 'bilateral_filter':
           outImage = applyBilateralFilter(
+            cv,
             primaryInput,
             Number(node.params.diameter ?? 7),
             Number(node.params.sigmaColor ?? 55),
@@ -1738,29 +2204,28 @@ export async function executePipeline(options: {
           );
           break;
         case 'box_blur':
-          outImage = applyBoxBlur(primaryInput, Number(node.params.kernelSize ?? 5));
+          outImage = applyBoxBlur(cv, primaryInput, Number(node.params.kernelSize ?? 5));
           break;
         case 'sobel':
-          outImage = applySobel(primaryInput, String(node.params.axis || 'xy'), Number(node.params.gain ?? 1.0));
+          outImage = applySobel(cv, primaryInput, String(node.params.axis || 'xy'), Number(node.params.gain ?? 1.0));
           break;
         case 'laplacian':
-          outImage = applyLaplacian(primaryInput, Number(node.params.gain ?? 1.5));
+          outImage = applyLaplacian(cv, primaryInput, Number(node.params.gain ?? 1.5));
           break;
-        case 'sharpen': {
-          const s = Number(node.params.strength ?? 1.2);
-          const blurred = applyGaussianBlur(primaryInput, 5);
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0; i < out.length; i += 4) {
-            for (let c = 0; c < 3; c++) {
-              out[i + c] = Math.min(255, Math.max(0, Math.round(primaryInput.data[i + c] * (1 + s) - blurred.data[i + c] * s)));
-            }
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'canny':
+          outImage = applyCanny(
+            cv,
+            primaryInput,
+            Number(node.params.threshold1 ?? 60),
+            Number(node.params.threshold2 ?? 150)
+          );
           break;
-        }
+        case 'sharpen':
+          outImage = applySharpen(cv, primaryInput, Number(node.params.strength ?? 1.2));
+          break;
         case 'draw_histogram':
           outImage = applyDrawHistogram(
+            cv,
             primaryInput,
             String(node.params.mode || 'channels'),
             Number(node.params.plotWidth ?? 512),
@@ -1769,34 +2234,27 @@ export async function executePipeline(options: {
           break;
         case 'adaptive_threshold':
           outImage = applyAdaptiveThreshold(
+            cv,
             primaryInput,
+            String(node.params.method || 'gaussian'),
             Number(node.params.blockSize ?? 11),
             Number(node.params.cConstant ?? 4)
           );
           break;
         case 'otsu_threshold':
-          outImage = applyOtsuThreshold(primaryInput, Boolean(node.params.invert));
+          outImage = applyOtsuThreshold(cv, primaryInput, Boolean(node.params.invert));
           break;
-        case 'binary_threshold': {
-          const th = Number(node.params.thresh ?? 128);
-          const mode = String(node.params.type || 'binary');
-          const gray = toGrayArray(primaryInput);
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-            const g = gray[p];
-            let v = 0;
-            if (mode === 'binary_inv') v = g > th ? 0 : 255;
-            else if (mode === 'trunc') v = g > th ? th : g;
-            else if (mode === 'tozero') v = g > th ? g : 0;
-            else v = g > th ? 255 : 0;
-            out[i] = out[i + 1] = out[i + 2] = v;
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'binary_threshold':
+          outImage = applyBinaryThreshold(
+            cv,
+            primaryInput,
+            Number(node.params.thresh ?? 128),
+            String(node.params.type || 'binary')
+          );
           break;
-        }
         case 'find_contours':
           outImage = applyFindContours(
+            cv,
             inputMap.mask || primaryInput,
             inputMap.canvas,
             Number(node.params.minArea ?? 40),
@@ -1806,21 +2264,16 @@ export async function executePipeline(options: {
           break;
         case 'corner_detect':
           outImage = applyCornerDetect(
+            cv,
             primaryInput,
             Number(node.params.maxCorners ?? 45),
             Number(node.params.threshold ?? 35),
             String(node.params.color || '#F58220')
           );
           break;
-        case 'canny':
-          outImage = applyCanny(
-            primaryInput,
-            Number(node.params.threshold1 ?? 60),
-            Number(node.params.threshold2 ?? 150)
-          );
-          break;
         case 'dilate':
           outImage = applyMorphology(
+            cv,
             primaryInput,
             'dilate',
             Number(node.params.kernelSize ?? 3),
@@ -1829,31 +2282,25 @@ export async function executePipeline(options: {
           break;
         case 'erode':
           outImage = applyMorphology(
+            cv,
             primaryInput,
             'erode',
             Number(node.params.kernelSize ?? 3),
             Number(node.params.iterations ?? 1)
           );
           break;
-        case 'morph_open': {
-          const k = Number(node.params.kernelSize ?? 3);
-          outImage = applyMorphology(applyMorphology(primaryInput, 'erode', k, 1), 'dilate', k, 1);
+        case 'morph_open':
+          outImage = applyMorphology(cv, primaryInput, 'open', Number(node.params.kernelSize ?? 3), 1);
           break;
-        }
-        case 'morph_close': {
-          const k = Number(node.params.kernelSize ?? 5);
-          outImage = applyMorphology(applyMorphology(primaryInput, 'dilate', k, 1), 'erode', k, 1);
+        case 'morph_close':
+          outImage = applyMorphology(cv, primaryInput, 'close', Number(node.params.kernelSize ?? 5), 1);
           break;
-        }
-        case 'morph_gradient': {
-          const k = Number(node.params.kernelSize ?? 3);
-          const d = applyMorphology(primaryInput, 'dilate', k, 1);
-          const e = applyMorphology(primaryInput, 'erode', k, 1);
-          outImage = applyArithmetic(d, e, undefined, 'subtract', 1);
+        case 'morph_gradient':
+          outImage = applyMorphology(cv, primaryInput, 'gradient', Number(node.params.kernelSize ?? 3), 1);
           break;
-        }
         case 'arithmetic':
           outImage = applyArithmetic(
+            cv,
             inputMap.a || primaryInput,
             inputMap.b,
             inputMap.mask,
@@ -1863,40 +2310,22 @@ export async function executePipeline(options: {
           break;
         case 'apply_mask':
           outImage = applyMaskOp(
+            cv,
             inputMap.image || primaryInput,
             inputMap.mask,
             Boolean(node.params.invertMask)
           );
           break;
-        case 'bitwise_not': {
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0; i < out.length; i += 4) {
-            out[i] = 255 - primaryInput.data[i];
-            out[i + 1] = 255 - primaryInput.data[i + 1];
-            out[i + 2] = 255 - primaryInput.data[i + 2];
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'bitwise_not':
+          outImage = applyBitwiseNot(cv, primaryInput);
           break;
-        }
-        case 'gamma_correction': {
-          const gamma = Math.max(0.1, Number(node.params.gamma ?? 1.35));
-          const invGamma = 1 / gamma;
-          const lut = new Uint8ClampedArray(256);
-          for (let i = 0; i < 256; i++) lut[i] = Math.round(Math.pow(i / 255, invGamma) * 255);
-          const out = new Uint8ClampedArray(primaryInput.data.length);
-          for (let i = 0; i < out.length; i += 4) {
-            out[i] = lut[primaryInput.data[i]];
-            out[i + 1] = lut[primaryInput.data[i + 1]];
-            out[i + 2] = lut[primaryInput.data[i + 2]];
-            out[i + 3] = 255;
-          }
-          outImage = new ImageData(out, primaryInput.width, primaryInput.height);
+        case 'gamma_correction':
+          outImage = applyGammaCorrection(cv, primaryInput, Number(node.params.gamma ?? 1.35));
           break;
-        }
         case 'resize': {
           const s = Math.max(0.25, Math.min(2.0, Number(node.params.scale ?? 0.75)));
-          outImage = resizeImageData(
+          outImage = resizeImageDataViaCv(
+            cv,
             primaryInput,
             Math.max(32, Math.round(primaryInput.width * s)),
             Math.max(32, Math.round(primaryInput.height * s))
@@ -1908,23 +2337,22 @@ export async function executePipeline(options: {
           const yPct = Number(node.params.y ?? 15) / 100;
           const wPct = Number(node.params.w ?? 70) / 100;
           const hPct = Number(node.params.h ?? 70) / 100;
-          const sx = Math.round(primaryInput.width * xPct);
-          const sy = Math.round(primaryInput.height * yPct);
+          const sx = Math.max(0, Math.min(primaryInput.width - 24, Math.round(primaryInput.width * xPct)));
+          const sy = Math.max(0, Math.min(primaryInput.height - 24, Math.round(primaryInput.height * yPct)));
           const cw = Math.max(24, Math.min(primaryInput.width - sx, Math.round(primaryInput.width * wPct)));
           const ch = Math.max(24, Math.min(primaryInput.height - sy, Math.round(primaryInput.height * hPct)));
-          const tmp = document.createElement('canvas');
-          tmp.width = primaryInput.width;
-          tmp.height = primaryInput.height;
-          tmp.getContext('2d')!.putImageData(primaryInput, 0, 0);
-          const dst = document.createElement('canvas');
-          dst.width = cw;
-          dst.height = ch;
-          dst.getContext('2d')!.drawImage(tmp, sx, sy, cw, ch, 0, 0, cw, ch);
-          outImage = dst.getContext('2d')!.getImageData(0, 0, cw, ch);
+          const mat = cv.matFromImageData(primaryInput);
+          const roi = mat.roi(new cv.Rect(sx, sy, cw, ch));
+          const copied = roi.clone();
+          outImage = matToImageData(cv, copied);
+          mat.delete();
+          roi.delete();
+          copied.delete();
           break;
         }
         case 'warp_affine':
           outImage = applyWarpAffine(
+            cv,
             primaryInput,
             Number(node.params.angle ?? 18),
             Number(node.params.scale ?? 0.92),
@@ -1935,7 +2363,72 @@ export async function executePipeline(options: {
           );
           break;
         case 'warp_perspective':
-          outImage = applyWarpPerspective(primaryInput, node.params);
+          outImage = applyWarpPerspective(cv, primaryInput, node.params);
+          break;
+        case 'face_detect_haar':
+          outImage = await applyFaceDetectHaar(
+            cv,
+            primaryInput,
+            Number(node.params.scaleFactor ?? 1.1),
+            Number(node.params.minNeighbors ?? 4),
+            String(node.params.privacyMode || 'bbox'),
+            String(node.params.boxColor || '#F43F5E')
+          );
+          break;
+        case 'face_landmarks':
+          outImage = await applyFaceLandmarks(
+            cv,
+            primaryInput,
+            node.params.showMesh !== false,
+            Number(node.params.pointRadius ?? 3),
+            String(node.params.landmarkColor || '#38BDF8')
+          );
+          break;
+        case 'face_skin_mask':
+          outImage = applySkinMask(
+            cv,
+            primaryInput,
+            Number(node.params.crMin ?? 133),
+            Number(node.params.crMax ?? 175),
+            Number(node.params.cbMin ?? 77),
+            Number(node.params.cbMax ?? 127),
+            String(node.params.outputMode || 'mask')
+          );
+          break;
+        case 'ml_kmeans':
+          outImage = applyKMeansQuantize(
+            cv,
+            primaryInput,
+            Number(node.params.k ?? 5),
+            Number(node.params.attempts ?? 6),
+            node.params.showPalette !== false
+          );
+          break;
+        case 'ml_svm_segment':
+          outImage = applySVMClassifier(
+            cv,
+            primaryInput,
+            String(node.params.kernel || 'rbf'),
+            String(node.params.targetClass || 'warm_skin_tones'),
+            String(node.params.viewMode || 'overlay'),
+            Number(node.params.cParam ?? 1.5)
+          );
+          break;
+        case 'ml_knn_posterize':
+          outImage = applyKNNMeanShift(
+            cv,
+            primaryInput,
+            Number(node.params.spatialRadius ?? 4),
+            Number(node.params.colorRadius ?? 38)
+          );
+          break;
+        case 'ml_pca':
+          outImage = applyPCAEigen(
+            cv,
+            primaryInput,
+            Number(node.params.components ?? 1),
+            String(node.params.mode || 'reconstruct')
+          );
           break;
         case 'osd_canvas': {
           const elements = Array.isArray(node.params.elements) ? (node.params.elements as OSDElement[]) : [];
@@ -2046,11 +2539,11 @@ export async function executePipeline(options: {
           break;
         }
         default:
-          outImage = cloneImageData(primaryInput);
+          throw new Error(`Unsupported OpenCV pipeline node type: ${node.type}`);
       }
     }
 
-    const durationMs = Math.max(1.2, performance.now() - t0);
+    const durationMs = Math.max(0.5, performance.now() - t0);
     totalMs += durationMs;
 
     const result: NodeExecutionResult = {
@@ -2062,7 +2555,8 @@ export async function executePipeline(options: {
         node.type === 'to_grayscale' ||
         node.type === 'canny' ||
         node.type === 'adaptive_threshold' ||
-        node.type === 'otsu_threshold'
+        node.type === 'otsu_threshold' ||
+        node.type === 'binary_threshold'
           ? 1
           : 3,
       durationMs,
@@ -2082,7 +2576,7 @@ export async function executePipeline(options: {
 
   logs.push({
     id: `complete-${Date.now()}`,
-    message: 'Execution complete',
+    message: 'Execution complete (OpenCV.js WASM)',
     kind: 'info',
     timestamp: Date.now(),
   });

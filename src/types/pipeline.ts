@@ -6,6 +6,8 @@ export type NodeCategory =
   | 'math'
   | 'morphology'
   | 'geometric'
+  | 'face'
+  | 'ml'
   | 'io'
   | 'osd';
 

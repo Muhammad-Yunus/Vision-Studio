@@ -23,8 +23,20 @@ interface RawGeneratedEdge {
   id?: unknown;
   source?: unknown;
   sourceHandle?: unknown;
+  sourcePort?: unknown;
+  from?: unknown;
+  fromPort?: unknown;
+  src?: unknown;
+  sourceNode?: unknown;
+  from_node?: unknown;
   target?: unknown;
   targetHandle?: unknown;
+  targetPort?: unknown;
+  to?: unknown;
+  toPort?: unknown;
+  dst?: unknown;
+  targetNode?: unknown;
+  to_node?: unknown;
 }
 
 function getAIConfig() {
@@ -57,10 +69,19 @@ function extractJsonObject(rawText: string): Record<string, unknown> {
 
 function sanitizeGeneratedPipeline(raw: Record<string, unknown>) {
   const rawNodes = Array.isArray(raw.nodes) ? (raw.nodes as RawGeneratedNode[]) : [];
-  const rawEdges = Array.isArray(raw.edges) ? (raw.edges as RawGeneratedEdge[]) : [];
+  const rawEdgesSource = Array.isArray(raw.edges)
+    ? raw.edges
+    : Array.isArray(raw.links)
+      ? raw.links
+      : Array.isArray(raw.connections)
+        ? raw.connections
+        : [];
+  const rawEdges = rawEdgesSource as RawGeneratedEdge[];
 
   const nodes = [];
   const usedIds = new Set<string>();
+  const rawRefToId = new Map<string, string>();
+  const typeToIds = new Map<string, string[]>();
 
   for (let i = 0; i < Math.min(24, rawNodes.length); i++) {
     const rn = rawNodes[i];
@@ -68,12 +89,28 @@ function sanitizeGeneratedPipeline(raw: Record<string, unknown>) {
     const spec = NODE_CATALOG_MAP[type];
     if (!spec) continue;
 
+    const rawIdStr =
+      typeof rn.id === 'string'
+        ? rn.id.trim()
+        : typeof rn.id === 'number' && Number.isFinite(rn.id)
+          ? String(rn.id)
+          : '';
+
     let id =
-      typeof rn.id === 'string' && /^[a-zA-Z0-9_-]{1,40}$/.test(rn.id)
-        ? rn.id
-        : `n_${type}_${i + 1}`;
+      rawIdStr && /^[a-zA-Z0-9_-]{1,40}$/.test(rawIdStr)
+        ? rawIdStr
+        : rawIdStr
+          ? rawIdStr.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || `n_${type}_${i + 1}`
+          : `n_${type}_${i + 1}`;
     if (usedIds.has(id)) id = `${id}_${i + 1}`;
     usedIds.add(id);
+
+    if (rawIdStr) rawRefToId.set(rawIdStr, id);
+    rawRefToId.set(id, id);
+    if (!rawRefToId.has(String(i))) rawRefToId.set(String(i), id);
+    const tArr = typeToIds.get(type) || [];
+    tArr.push(id);
+    typeToIds.set(type, tArr);
 
     const x =
       typeof rn.position?.x === 'number' && Number.isFinite(rn.position.x)
@@ -82,7 +119,7 @@ function sanitizeGeneratedPipeline(raw: Record<string, unknown>) {
     const y =
       typeof rn.position?.y === 'number' && Number.isFinite(rn.position.y)
         ? Math.max(0, Math.min(1400, Math.round(rn.position.y)))
-        : 180 + (i % 2) * 140;
+        : 200;
 
     const params: Record<string, unknown> = {};
     for (const p of spec.params) {
@@ -109,26 +146,45 @@ function sanitizeGeneratedPipeline(raw: Record<string, unknown>) {
   }
 
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const resolveNodeRef = (val: unknown): string => {
+    const ref =
+      typeof val === 'string'
+        ? val.trim()
+        : typeof val === 'number' && Number.isFinite(val)
+          ? String(val)
+          : '';
+    if (!ref) return '';
+    if (nodeById.has(ref)) return ref;
+    const mapped = rawRefToId.get(ref);
+    if (mapped && nodeById.has(mapped)) return mapped;
+    const byType = typeToIds.get(ref);
+    if (byType && byType.length === 1) return byType[0];
+    return '';
+  };
+
   const edges = [];
   const usedTargets = new Set<string>();
 
   for (let i = 0; i < Math.min(48, rawEdges.length); i++) {
     const re = rawEdges[i];
-    const source = typeof re.source === 'string' ? re.source : '';
-    const target = typeof re.target === 'string' ? re.target : '';
-    if (!nodeById.has(source) || !nodeById.has(target) || source === target) continue;
+    const source = resolveNodeRef(re.source ?? re.from ?? re.src ?? re.sourceNode ?? re.from_node);
+    const target = resolveNodeRef(re.target ?? re.to ?? re.dst ?? re.targetNode ?? re.to_node);
+    if (!source || !target || source === target) continue;
 
     const srcSpec = NODE_CATALOG_MAP[nodeById.get(source)!.type];
     const tgtSpec = NODE_CATALOG_MAP[nodeById.get(target)!.type];
     if (!srcSpec || !tgtSpec || srcSpec.outputs.length === 0 || tgtSpec.inputs.length === 0) continue;
 
+    const rawSrcHandle = re.sourceHandle ?? re.sourcePort ?? re.fromPort;
+    const rawTgtHandle = re.targetHandle ?? re.targetPort ?? re.toPort;
+
     const sourceHandle =
-      typeof re.sourceHandle === 'string' && srcSpec.outputs.some((o) => o.id === re.sourceHandle)
-        ? re.sourceHandle
+      typeof rawSrcHandle === 'string' && srcSpec.outputs.some((o) => o.id === rawSrcHandle)
+        ? rawSrcHandle
         : srcSpec.outputs[0].id;
     const targetHandle =
-      typeof re.targetHandle === 'string' && tgtSpec.inputs.some((inp) => inp.id === re.targetHandle)
-        ? re.targetHandle
+      typeof rawTgtHandle === 'string' && tgtSpec.inputs.some((inp) => inp.id === rawTgtHandle)
+        ? rawTgtHandle
         : tgtSpec.inputs[0].id;
 
     const targetKey = `${target}:${targetHandle}`;
@@ -142,6 +198,27 @@ function sanitizeGeneratedPipeline(raw: Record<string, unknown>) {
       target,
       targetHandle,
     });
+  }
+
+  // Fallback auto-wiring if model returned multiple nodes with no usable edge objects
+  if (nodes.length > 1 && edges.length === 0) {
+    const ordered = [...nodes].sort((a, b) => a.position.x - b.position.x);
+    for (let i = 0; i < ordered.length - 1; i++) {
+      const src = ordered[i];
+      const tgt = ordered[i + 1];
+      const srcSpec = NODE_CATALOG_MAP[src.type];
+      const tgtSpec = NODE_CATALOG_MAP[tgt.type];
+      if (!srcSpec || !tgtSpec || srcSpec.outputs.length === 0 || tgtSpec.inputs.length === 0) {
+        continue;
+      }
+      edges.push({
+        id: `e_ai_auto_${i + 1}`,
+        source: src.id,
+        sourceHandle: srcSpec.outputs[0].id,
+        target: tgt.id,
+        targetHandle: tgtSpec.inputs[0].id,
+      });
+    }
   }
 
   const name =
@@ -210,8 +287,11 @@ async function startServer() {
 
     const systemPrompt = [
       'You are an OpenCV visual pipeline architect for Vision Studio.',
-      'Convert the user request into a valid DAG JSON object with keys: "name", "description", "nodes", "edges".',
-      'Always start with a "load_image" node on the left (e.g., x: 40, y: 220) and lay out downstream nodes left-to-right (increment x by ~210px per stage, branch y by +/-170px).',
+      'Convert the user request into a valid connected DAG JSON object with keys: "name", "description", "nodes", "edges".',
+      'Always start with a "load_image" node on the left (x: 40, y: 200) and lay out downstream nodes left-to-right (increment x by ~210px per stage, branch y by +/-170px).',
+      'CRITICAL: You MUST populate the "edges" array connecting every node using exact node "id" values and exact port IDs ("sourceHandle" from source outputs, "targetHandle" from target inputs).',
+      'Example JSON structure:',
+      '{"name":"Edge Pipeline","description":"...","nodes":[{"id":"n1","type":"load_image","position":{"x":40,"y":200},"params":{"sampleId":"portrait"}},{"id":"n2","type":"canny","position":{"x":250,"y":200},"params":{"threshold1":60,"threshold2":150}}],"edges":[{"id":"e1","source":"n1","sourceHandle":"image","target":"n2","targetHandle":"image"}]}',
       'Use ONLY node types and handle IDs from this exact catalog:',
       buildCatalogPromptSpec(),
       'Return ONLY raw JSON without markdown prose.',
@@ -262,6 +342,7 @@ async function startServer() {
   });
 
   if (!IS_PROD) {
+    app.use(express.static(path.resolve(__dirname, 'public')));
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },

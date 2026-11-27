@@ -17,7 +17,7 @@ import {
   Type,
   X,
 } from 'lucide-react';
-import { renderOSDElementsToImageData } from '../engine/cvEngine';
+import { ensureOpenCVReady, isOpenCVWasmReady, renderOSDElementsToImageData } from '../engine/cvEngine';
 import { OSDElement, OSDElementKind } from '../types/pipeline';
 
 interface OSDEditorModalProps {
@@ -167,12 +167,24 @@ export const OSDEditorModal: React.FC<OSDEditorModalProps> = ({
   // Live render via OpenCV drawing engine onto the editor canvas
   useEffect(() => {
     if (!open || !canvasRef.current) return;
-    const rendered = renderOSDElementsToImageData(baseImageData, elements, globalOpacity, showGridBurnIn);
-    const canvas = canvasRef.current;
-    canvas.width = rendered.width;
-    canvas.height = rendered.height;
-    const ctx = canvas.getContext('2d');
-    ctx?.putImageData(rendered, 0, 0);
+    let cancelled = false;
+    const draw = () => {
+      if (cancelled || !canvasRef.current) return;
+      const rendered = renderOSDElementsToImageData(baseImageData, elements, globalOpacity, showGridBurnIn);
+      const canvas = canvasRef.current;
+      canvas.width = rendered.width;
+      canvas.height = rendered.height;
+      const ctx = canvas.getContext('2d');
+      ctx?.putImageData(rendered, 0, 0);
+    };
+    if (isOpenCVWasmReady()) {
+      draw();
+    } else {
+      ensureOpenCVReady().then(draw).catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
   }, [open, baseImageData, elements, globalOpacity, showGridBurnIn]);
 
   useEffect(() => {

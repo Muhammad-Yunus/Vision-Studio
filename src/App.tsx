@@ -11,8 +11,8 @@ import { PIPELINE_TEMPLATES } from './data/templates';
 import { generatePythonOpenCVCode } from './engine/codeGenerator';
 import {
   clearExecutionCache,
+  ensureOpenCVReady,
   executePipeline,
-  isOpenCVWasmReady,
 } from './engine/cvEngine';
 import { getSampleImageData } from './engine/sampleImages';
 import {
@@ -73,17 +73,17 @@ export default function App() {
   const [aiModalOpen, setAiModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
-    let attempts = 0;
-    const timer = setInterval(() => {
-      attempts++;
-      if (isOpenCVWasmReady()) {
-        setWasmReady(true);
-        clearInterval(timer);
-      } else if (attempts > 30) {
-        clearInterval(timer);
-      }
-    }, 500);
-    return () => clearInterval(timer);
+    let mounted = true;
+    ensureOpenCVReady()
+      .then(() => {
+        if (mounted) setWasmReady(true);
+      })
+      .catch((err) => {
+        console.error('OpenCV WASM initialization failed:', err);
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const runGraph = useCallback(
@@ -103,6 +103,16 @@ export default function App() {
         setResults((prev) => (stopAtNodeId ? { ...prev, ...exec.results } : exec.results));
         setLogs(exec.logs);
         setTotalMs(exec.totalMs);
+      } catch (err) {
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: `err-${Date.now()}`,
+            message: err instanceof Error ? err.message : 'OpenCV execution error',
+            kind: 'error',
+            timestamp: Date.now(),
+          },
+        ]);
       } finally {
         setIsRunning(false);
       }

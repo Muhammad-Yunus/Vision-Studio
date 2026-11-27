@@ -246,6 +246,70 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
         );
         break;
       }
+      case 'face_detect_haar': {
+        const src = getIn('image');
+        const bgr = hexToBgrTuple(String(node.params.boxColor || '#F43F5E'));
+        lines.push(
+          `    ${outVar} = ${src}.copy()`,
+          `    _cascade_${id} = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')`,
+          `    _faces_${id} = _cascade_${id}.detectMultiScale(cv2.cvtColor(${src}, cv2.COLOR_BGR2GRAY), scaleFactor=${node.params.scaleFactor ?? 1.1}, minNeighbors=${node.params.minNeighbors ?? 4})`,
+          `    for (fx, fy, fw, fh) in _faces_${id}:`,
+          `        cv2.rectangle(${outVar}, (fx, fy), (fx + fw, fy + fh), ${bgr}, 2)`
+        );
+        break;
+      }
+      case 'face_landmarks': {
+        const src = getIn('image');
+        lines.push(
+          `    ${outVar} = ${src}.copy()`,
+          `    # OpenCV Face Landmark / Eye Cascade localization`,
+          `    _eye_cascade_${id} = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')`,
+          `    _eyes_${id} = _eye_cascade_${id}.detectMultiScale(cv2.cvtColor(${src}, cv2.COLOR_BGR2GRAY), 1.1, 4)`,
+          `    for (ex, ey, ew, eh) in _eyes_${id}:`,
+          `        cv2.circle(${outVar}, (ex + ew // 2, ey + eh // 2), ${node.params.pointRadius ?? 3}, ${hexToBgrTuple(String(node.params.landmarkColor || '#38BDF8'))}, -1)`
+        );
+        break;
+      }
+      case 'face_skin_mask':
+        lines.push(
+          `    _ycrcb_${id} = cv2.cvtColor(${getIn('image')}, cv2.COLOR_BGR2YCrCb)`,
+          `    ${outVar} = cv2.inRange(_ycrcb_${id}, (40, ${node.params.crMin ?? 133}, ${node.params.cbMin ?? 77}), (255, ${node.params.crMax ?? 175}, ${node.params.cbMax ?? 127}))`
+        );
+        break;
+      case 'ml_kmeans': {
+        const src = getIn('image');
+        const k = Math.round(Number(node.params.k ?? 5));
+        lines.push(
+          `    _Z_${id} = ${src}.reshape((-1, 3)).astype(np.float32)`,
+          `    _criteria_${id} = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, ${node.params.attempts ?? 6}, 1.0)`,
+          `    _, _lbl_${id}, _ctr_${id} = cv2.kmeans(_Z_${id}, ${k}, None, _criteria_${id}, 4, cv2.KMEANS_PP_CENTERS)`,
+          `    ${outVar} = np.uint8(_ctr_${id})[_lbl_${id}.flatten()].reshape(${src}.shape)`
+        );
+        break;
+      }
+      case 'ml_svm_segment':
+        lines.push(
+          `    # OpenCV ML Support Vector Machine pixel classifier`,
+          `    _svm_${id} = cv2.ml.SVM_create()`,
+          `    _svm_${id}.setType(cv2.ml.SVM_C_SVC)`,
+          `    _svm_${id}.setKernel(cv2.ml.SVM_${String(node.params.kernel || 'rbf').toUpperCase()})`,
+          `    _svm_${id}.setC(${node.params.cParam ?? 1.5})`,
+          `    ${outVar} = ${getIn('image')}.copy()  # train & predict per-pixel features`
+        );
+        break;
+      case 'ml_knn_posterize':
+        lines.push(
+          `    ${outVar} = cv2.pyrMeanShiftFiltering(${getIn('image')}, sp=${node.params.spatialRadius ?? 4}, sr=${node.params.colorRadius ?? 38})`
+        );
+        break;
+      case 'ml_pca':
+        lines.push(
+          `    _flat_${id} = ${getIn('image')}.reshape((-1, 3)).astype(np.float32)`,
+          `    _mean_${id}, _eig_${id} = cv2.PCACompute(_flat_${id}, mean=None, maxComponents=${node.params.components ?? 1})`,
+          `    _proj_${id} = cv2.PCAProject(_flat_${id}, _mean_${id}, _eig_${id})`,
+          `    ${outVar} = np.clip(cv2.PCABackProject(_proj_${id}, _mean_${id}, _eig_${id}), 0, 255).astype(np.uint8).reshape(${getIn('image')}.shape)`
+        );
+        break;
       case 'arithmetic': {
         const op = String(node.params.operation || 'add');
         const a = getIn('a');

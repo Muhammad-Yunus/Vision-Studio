@@ -11,6 +11,8 @@ export const CATEGORY_META: Record<
   math: { label: 'MATH', dotColor: '#F59E0B', headerColor: '#F59E0B' },
   morphology: { label: 'MORPHOLOGY', dotColor: '#6366F1', headerColor: '#6366F1' },
   geometric: { label: 'GEOMETRIC', dotColor: '#2DD4BF', headerColor: '#2DD4BF' },
+  face: { label: 'FACE', dotColor: '#F43F5E', headerColor: '#F43F5E' },
+  ml: { label: 'ML', dotColor: '#8B5CF6', headerColor: '#8B5CF6' },
   io: { label: 'IO', dotColor: '#94A3B8', headerColor: '#94A3B8' },
   osd: { label: 'OSD', dotColor: '#F97316', headerColor: '#F97316' },
 };
@@ -23,6 +25,8 @@ export const CATEGORY_ORDER: NodeCategory[] = [
   'math',
   'morphology',
   'geometric',
+  'face',
+  'ml',
   'io',
   'osd',
 ];
@@ -732,6 +736,162 @@ export const NODE_CATALOG: NodeCatalogItem[] = [
         options: [
           { label: 'BORDER_CONSTANT', value: 'constant' },
           { label: 'BORDER_REPLICATE', value: 'replicate' },
+        ],
+      },
+    ],
+  },
+
+  // OPENCV FACE MODULE
+  {
+    type: 'face_detect_haar',
+    title: 'Face Detect (Haar)',
+    category: 'face',
+    description: 'Detect frontal face ROI via cv2.CascadeClassifier with optional privacy blur.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'FACE OUT' }],
+    params: [
+      { key: 'scaleFactor', label: 'Scale Factor', type: 'range', defaultValue: 1.1, min: 1.05, max: 1.4, step: 0.05 },
+      { key: 'minNeighbors', label: 'Min Neighbors', type: 'number', defaultValue: 4, min: 1, max: 10, step: 1 },
+      {
+        key: 'privacyMode',
+        label: 'Overlay / Privacy',
+        type: 'select',
+        defaultValue: 'bbox',
+        options: [
+          { label: 'Draw BBox + Confidence', value: 'bbox' },
+          { label: 'Gaussian Privacy Blur', value: 'blur' },
+          { label: 'Mosaic Pixelate', value: 'pixelate' },
+        ],
+      },
+      { key: 'boxColor', label: 'Box Color', type: 'color', defaultValue: '#F43F5E' },
+    ],
+  },
+  {
+    type: 'face_landmarks',
+    title: 'Face Landmarks',
+    category: 'face',
+    description: 'Localize eye pair, nose bridge, and mouth landmarks via OpenCV Face.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'LANDMARKS' }],
+    params: [
+      { key: 'showMesh', label: 'Draw Eye-Nose Mesh', type: 'boolean', defaultValue: true },
+      { key: 'pointRadius', label: 'Keypoint Radius', type: 'range', defaultValue: 3, min: 2, max: 7, step: 1 },
+      { key: 'landmarkColor', label: 'Keypoint Color', type: 'color', defaultValue: '#38BDF8' },
+    ],
+  },
+  {
+    type: 'face_skin_mask',
+    title: 'Skin & Face Mask',
+    category: 'face',
+    description: 'YCrCb chrominance face/skin segmentation mask for cv2.inRange.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'mask', label: 'SKIN MASK' }],
+    params: [
+      { key: 'crMin', label: 'Cr Min', type: 'range', defaultValue: 133, min: 120, max: 155, step: 1 },
+      { key: 'crMax', label: 'Cr Max', type: 'range', defaultValue: 175, min: 160, max: 195, step: 1 },
+      { key: 'cbMin', label: 'Cb Min', type: 'range', defaultValue: 77, min: 60, max: 105, step: 1 },
+      { key: 'cbMax', label: 'Cb Max', type: 'range', defaultValue: 127, min: 110, max: 150, step: 1 },
+      {
+        key: 'outputMode',
+        label: 'Output Mode',
+        type: 'select',
+        defaultValue: 'mask',
+        options: [
+          { label: 'Binary Mask', value: 'mask' },
+          { label: 'Masked Color Overlay', value: 'overlay' },
+        ],
+      },
+    ],
+  },
+
+  // OPENCV ML MODULE
+  {
+    type: 'ml_kmeans',
+    title: 'K-Means Quantize',
+    category: 'ml',
+    description: 'Unsupervised color clustering & palette quantization via cv2.kmeans().',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'CLUSTERED' }],
+    params: [
+      { key: 'k', label: 'Clusters (K)', type: 'range', defaultValue: 5, min: 2, max: 16, step: 1 },
+      { key: 'attempts', label: 'Max Iterations', type: 'number', defaultValue: 6, min: 2, max: 15, step: 1 },
+      { key: 'showPalette', label: 'Show Palette Strip', type: 'boolean', defaultValue: true },
+    ],
+  },
+  {
+    type: 'ml_svm_segment',
+    title: 'SVM Classifier',
+    category: 'ml',
+    description: 'Pixel feature classification & segmentation via cv2.ml.SVM_create().',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'PREDICTION' }],
+    params: [
+      {
+        key: 'kernel',
+        label: 'SVM Kernel',
+        type: 'select',
+        defaultValue: 'rbf',
+        options: [
+          { label: 'SVM_RBF', value: 'rbf' },
+          { label: 'SVM_LINEAR', value: 'linear' },
+          { label: 'SVM_POLY', value: 'poly' },
+        ],
+      },
+      {
+        key: 'targetClass',
+        label: 'Target Feature',
+        type: 'select',
+        defaultValue: 'warm_skin_tones',
+        options: [
+          { label: 'Warm / Skin Tones', value: 'warm_skin_tones' },
+          { label: 'Salient Luminance', value: 'salient_lum' },
+          { label: 'High Saturation', value: 'high_sat' },
+        ],
+      },
+      {
+        key: 'viewMode',
+        label: 'Visualization',
+        type: 'select',
+        defaultValue: 'overlay',
+        options: [
+          { label: 'Decision Overlay', value: 'overlay' },
+          { label: 'Probability Heatmap', value: 'heatmap' },
+          { label: 'Binary Prediction Mask', value: 'mask' },
+        ],
+      },
+      { key: 'cParam', label: 'Margin C', type: 'range', defaultValue: 1.5, min: 0.2, max: 6.0, step: 0.2 },
+    ],
+  },
+  {
+    type: 'ml_knn_posterize',
+    title: 'KNN / MeanShift',
+    category: 'ml',
+    description: 'Spatial-color feature clustering & edge-preserving region smoothing.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'REGIONS' }],
+    params: [
+      { key: 'spatialRadius', label: 'Spatial Radius', type: 'range', defaultValue: 4, min: 2, max: 10, step: 1 },
+      { key: 'colorRadius', label: 'Color Radius', type: 'range', defaultValue: 38, min: 12, max: 80, step: 2 },
+    ],
+  },
+  {
+    type: 'ml_pca',
+    title: 'PCA Eigen',
+    category: 'ml',
+    description: 'Color-space Principal Component Analysis via cv2.PCACompute().',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'PCA OUT' }],
+    params: [
+      { key: 'components', label: 'Components (1-3)', type: 'range', defaultValue: 1, min: 1, max: 3, step: 1 },
+      {
+        key: 'mode',
+        label: 'Mode',
+        type: 'select',
+        defaultValue: 'reconstruct',
+        options: [
+          { label: 'PCA Reconstruction', value: 'reconstruct' },
+          { label: 'PC1 Projection', value: 'pc1' },
+          { label: 'PC2 Residual', value: 'pc2' },
         ],
       },
     ],

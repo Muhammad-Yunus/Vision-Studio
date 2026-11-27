@@ -240,4 +240,55 @@ export const PIPELINE_TEMPLATES: PipelineTemplate[] = [
       { id: 'ep5', source: 'n_pcb_blend', sourceHandle: 'result', target: 'n_pcb_osd', targetHandle: 'image' },
     ],
   },
+  {
+    id: 'face-ml-studio',
+    name: 'OpenCV Face & ML Studio',
+    description: 'Haar face detection, landmarks, YCrCb skin mask, K-Means & SVM clustering.',
+    defaultSelectedNodeId: 'n_fm_kmeans',
+    nodes: [
+      {
+        id: 'n_fm_load',
+        type: 'load_image',
+        position: { x: 40, y: 210 },
+        params: { sampleId: 'portrait', customDataUrl: '' },
+      },
+      {
+        id: 'n_fm_face',
+        type: 'face_detect_haar',
+        position: { x: 260, y: 70 },
+        params: { scaleFactor: 1.1, minNeighbors: 4, privacyMode: 'bbox', boxColor: '#F43F5E' },
+      },
+      {
+        id: 'n_fm_landmarks',
+        type: 'face_landmarks',
+        position: { x: 480, y: 70 },
+        params: { showMesh: true, pointRadius: 3, landmarkColor: '#38BDF8' },
+      },
+      {
+        id: 'n_fm_kmeans',
+        type: 'ml_kmeans',
+        position: { x: 260, y: 250 },
+        params: { k: 5, attempts: 6, showPalette: true },
+      },
+      {
+        id: 'n_fm_svm',
+        type: 'ml_svm_segment',
+        position: { x: 480, y: 250 },
+        params: { kernel: 'rbf', targetClass: 'warm_skin_tones', viewMode: 'heatmap', cParam: 1.5 },
+      },
+      {
+        id: 'n_fm_skin',
+        type: 'face_skin_mask',
+        position: { x: 260, y: 430 },
+        params: { crMin: 133, crMax: 175, cbMin: 77, cbMax: 127, outputMode: 'mask' },
+      },
+    ],
+    edges: [
+      { id: 'efm1', source: 'n_fm_load', sourceHandle: 'image', target: 'n_fm_face', targetHandle: 'image' },
+      { id: 'efm2', source: 'n_fm_face', sourceHandle: 'image', target: 'n_fm_landmarks', targetHandle: 'image' },
+      { id: 'efm3', source: 'n_fm_load', sourceHandle: 'image', target: 'n_fm_kmeans', targetHandle: 'image' },
+      { id: 'efm4', source: 'n_fm_kmeans', sourceHandle: 'image', target: 'n_fm_svm', targetHandle: 'image' },
+      { id: 'efm5', source: 'n_fm_load', sourceHandle: 'image', target: 'n_fm_skin', targetHandle: 'image' },
+    ],
+  },
 ];
