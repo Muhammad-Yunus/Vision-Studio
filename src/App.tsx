@@ -1038,6 +1038,12 @@ export default function App() {
       {/* AI Prompt Pipeline Generator Modal */}
       <AIGenerateModal
         open={aiModalOpen}
+        currentInputDataUrl={(() => {
+          const loadNode = nodes.find((n) => n.type === 'load_image');
+          if (!loadNode) return null;
+          const customUrl = typeof loadNode.params.customDataUrl === 'string' ? loadNode.params.customDataUrl : '';
+          return customUrl || results[loadNode.id]?.previewDataUrl || null;
+        })()}
         onClose={() => setAiModalOpen(false)}
         onApplyPipeline={(generated) => {
           pushHistorySnapshot();

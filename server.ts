@@ -246,7 +246,7 @@ function buildCatalogPromptSpec(): string {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '512kb' }));
+  app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/ai/status', (_req: Request, res: Response) => {
     const { baseUrl, model, secret } = getAIConfig();
@@ -258,15 +258,38 @@ async function startServer() {
   });
 
   app.post('/api/ai/generate-pipeline', async (req: Request, res: Response) => {
-    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
-    if (!prompt) {
-      res.status(400).json({ error: 'Prompt is required.' });
+    const rawPrompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+    const rawRefImage =
+      typeof req.body?.referenceImage === 'string' ? req.body.referenceImage.trim() : '';
+    const refMeta =
+      req.body?.referenceMeta && typeof req.body.referenceMeta === 'object'
+        ? (req.body.referenceMeta as { name?: unknown; width?: unknown; height?: unknown })
+        : null;
+
+    const hasRefImage = Boolean(rawRefImage);
+    if (hasRefImage) {
+      if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(rawRefImage)) {
+        res.status(400).json({ error: 'Invalid referenceImage format. Expected base64 image data URL.' });
+        return;
+      }
+      if (rawRefImage.length > 3_500_000) {
+        res.status(400).json({ error: 'Reference image is too large. Please upload a smaller image.' });
+        return;
+      }
+    }
+
+    if (!rawPrompt && !hasRefImage) {
+      res.status(400).json({ error: 'Prompt or reference image is required.' });
       return;
     }
-    if (prompt.length > 2000) {
+    if (rawPrompt.length > 2000) {
       res.status(400).json({ error: 'Prompt must be 2000 characters or fewer.' });
       return;
     }
+
+    const prompt =
+      rawPrompt ||
+      'Analyze the uploaded reference input image and build an optimal OpenCV processing pipeline tailored to its visual characteristics.';
 
     const { baseUrl, model, secret } = getAIConfig();
     if (!secret) {
@@ -297,8 +320,29 @@ async function startServer() {
       'Return ONLY raw JSON without markdown prose.',
     ].join('\n');
 
-    try {
-      const upstream = await fetch(endpoint, {
+    const refName =
+      typeof refMeta?.name === 'string' && refMeta.name.trim()
+        ? refMeta.name.trim().slice(0, 80)
+        : 'uploaded_reference';
+    const refW =
+      typeof refMeta?.width === 'number' && Number.isFinite(refMeta.width) ? Math.round(refMeta.width) : null;
+    const refH =
+      typeof refMeta?.height === 'number' && Number.isFinite(refMeta.height) ? Math.round(refMeta.height) : null;
+
+    const userText = hasRefImage
+      ? `${prompt}\n\n[Reference Input Image attached: "${refName}"${refW && refH ? ` (${refW}x${refH}px)` : ''}. Inspect its visual content, lighting, contrast, noise, edges, geometry, or subjects and tailor the OpenCV nodes and parameter values accordingly. The uploaded image will automatically be loaded into the first load_image node.]`
+      : prompt;
+
+    const callUpstream = async (withImage: boolean) => {
+      const userContent =
+        withImage && hasRefImage
+          ? [
+              { type: 'text', text: userText },
+              { type: 'image_url', image_url: { url: rawRefImage } },
+            ]
+          : userText;
+
+      return fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -309,13 +353,25 @@ async function startServer() {
           temperature: 0.2,
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt },
+            { role: 'user', content: userContent },
           ],
         }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(40000),
       });
+    };
 
-      const payloadText = await upstream.text();
+    try {
+      let visionFallback = false;
+      let upstream = await callUpstream(hasRefImage);
+      let payloadText = await upstream.text();
+
+      // Fallback to text-only if upstream model does not support multimodal image_url content
+      if (hasRefImage && !upstream.ok && [400, 404, 415, 422].includes(upstream.status)) {
+        visionFallback = true;
+        upstream = await callUpstream(false);
+        payloadText = await upstream.text();
+      }
+
       if (!upstream.ok) {
         res.status(upstream.status).json({
           error: `OpenAI-compatible upstream returned ${upstream.status}: ${payloadText.slice(0, 260)}`,
@@ -334,7 +390,7 @@ async function startServer() {
 
       const parsedJson = extractJsonObject(content);
       const pipeline = sanitizeGeneratedPipeline(parsedJson);
-      res.json({ pipeline, model });
+      res.json({ pipeline, model, visionUsed: hasRefImage && !visionFallback, visionFallback });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to generate pipeline.';
       res.status(500).json({ error: msg });
