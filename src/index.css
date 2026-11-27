@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-sans);
+    background-color: #0b0d10;
+    color: #e6edf3;
+  }
+}
+
+.font-mono-tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle checkerboard for transparent outputs like Draw Histogram */
+.bg-checkerboard {
+  background-color: #101317;
+  background-image:
+    linear-gradient(45deg, #181c22 25%, transparent 25%),
+    linear-gradient(-45deg, #181c22 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #181c22 75%),
+    linear-gradient(-45deg, transparent 75%, #181c22 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+}
+
+/* Studio scrollbars matching the mockup */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0d1014;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #282e37;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a424e;
+}
+
+/* Range input sleek dark styling */
+input[type='range'].studio-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: #262b33;
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type='range'].studio-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #f58220;
+  cursor: pointer;
+  border: 2px solid #12151a;
+}

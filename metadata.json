@@ -1,0 +1,6 @@
+{
+  "name": "Vision Studio",
+  "description": "Node-based visual pipeline builder for OpenCV JS (WASM) image processing and interactive OSD canvas drawing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
