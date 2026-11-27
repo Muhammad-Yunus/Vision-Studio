@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Camera,
   Copy,
+  Crop,
   Lock,
   Maximize2,
   Minus,
   MoreVertical,
+  Move,
   Paintbrush,
   Play,
   Plus,
+  Power,
   Trash2,
   Unlock,
-  X,
 } from 'lucide-react';
 import { CATEGORY_META, NODE_CATALOG_MAP } from '../data/nodeCatalog';
 import { NodeExecutionResult, PipelineEdge, PipelineNode } from '../types/pipeline';
@@ -21,14 +24,19 @@ interface PipelineCanvasProps {
   selectedNodeId: string | null;
   results: Record<string, NodeExecutionResult>;
   onSelectNode: (id: string | null) => void;
+  onNodeDragStart?: () => void;
   onMoveNode: (id: string, pos: { x: number; y: number }) => void;
   onAddNodeAt: (type: string, pos: { x: number; y: number }) => void;
   onConnect: (source: string, sourceHandle: string, target: string, targetHandle: string) => void;
   onDeleteEdge: (edgeId: string) => void;
   onDeleteNode: (nodeId: string) => void;
   onDuplicateNode: (nodeId: string) => void;
+  onToggleBypass: (nodeId: string) => void;
   onRunToNode: (nodeId: string) => void;
   onOpenOSDEditor: (nodeId: string) => void;
+  onOpenGeometryEditor: (nodeId: string) => void;
+  webcamActive: boolean;
+  onToggleWebcam: () => void;
   fitTrigger: number;
 }
 
@@ -107,14 +115,19 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
   selectedNodeId,
   results,
   onSelectNode,
+  onNodeDragStart,
   onMoveNode,
   onAddNodeAt,
   onConnect,
   onDeleteEdge,
   onDeleteNode,
   onDuplicateNode,
+  onToggleBypass,
   onRunToNode,
   onOpenOSDEditor,
+  onOpenGeometryEditor,
+  webcamActive,
+  onToggleWebcam,
   fitTrigger,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -129,6 +142,7 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
     startClientY: number;
     origX: number;
     origY: number;
+    pushedHistory: boolean;
   } | null>(null);
 
   const [panning, setPanning] = useState<{
@@ -182,6 +196,10 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
       if (draggingNode && !locked) {
         const dx = (e.clientX - draggingNode.startClientX) / viewport.zoom;
         const dy = (e.clientY - draggingNode.startClientY) / viewport.zoom;
+        if (!draggingNode.pushedHistory && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+          onNodeDragStart?.();
+          setDraggingNode((prev) => (prev ? { ...prev, pushedHistory: true } : null));
+        }
         onMoveNode(draggingNode.id, {
           x: Math.round(draggingNode.origX + dx),
           y: Math.round(draggingNode.origY + dy),
@@ -425,10 +443,13 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                     startClientY: e.clientY,
                     origX: node.position.x,
                     origY: node.position.y,
+                    pushedHistory: false,
                   });
                 }
               }}
               className={`absolute rounded-[7px] bg-[#15181E] border transition-shadow ${
+                node.bypassed ? 'opacity-65 border-dashed ' : ''
+              }${
                 isSelected
                   ? 'border-[#389E82] ring-1 ring-[#389E82]/50 shadow-[0_8px_28px_rgba(0,0,0,0.65)]'
                   : 'border-[#282D37] hover:border-[#3A414E] shadow-[0_6px_20px_rgba(0,0,0,0.5)]'
@@ -449,6 +470,24 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                 </div>
 
                 <div className="flex items-center gap-0.5 shrink-0">
+                  {node.type !== 'load_image' && node.type !== 'webcam_input' && (
+                    <button
+                      type="button"
+                      title={node.bypassed ? 'Enable node (M)' : 'Bypass / Mute node (M)'}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleBypass(node.id);
+                      }}
+                      className={`p-0.5 transition-colors cursor-pointer ${
+                        node.bypassed
+                          ? 'text-[#F59E0B] hover:text-[#FBBF24]'
+                          : 'text-[#8B949E] hover:text-white'
+                      }`}
+                    >
+                      <Power className="w-3 h-3" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     title="Run to this node"
@@ -479,7 +518,7 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                     {menuNodeId === node.id && (
                       <div
                         onPointerDown={(e) => e.stopPropagation()}
-                        className="absolute right-0 top-5 w-40 rounded-md bg-[#1B1F27] border border-[#303642] shadow-2xl py-1 z-50 text-[11px]"
+                        className="absolute right-0 top-5 w-44 rounded-md bg-[#1B1F27] border border-[#303642] shadow-2xl py-1 z-50 text-[11px]"
                       >
                         {node.type === 'osd_canvas' && (
                           <button
@@ -492,6 +531,36 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                           >
                             <Paintbrush className="w-3 h-3" />
                             <span>Open OSD Editor</span>
+                          </button>
+                        )}
+                        {(node.type === 'warp_perspective' || node.type === 'crop_roi') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMenuNodeId(null);
+                              onOpenGeometryEditor(node.id);
+                            }}
+                            className="w-full px-2.5 py-1.5 text-left text-[#2DD4BF] hover:bg-[#252A35] flex items-center gap-2 cursor-pointer"
+                          >
+                            {node.type === 'warp_perspective' ? (
+                              <Move className="w-3 h-3" />
+                            ) : (
+                              <Crop className="w-3 h-3" />
+                            )}
+                            <span>Visual Picker</span>
+                          </button>
+                        )}
+                        {node.type !== 'load_image' && node.type !== 'webcam_input' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMenuNodeId(null);
+                              onToggleBypass(node.id);
+                            }}
+                            className="w-full px-2.5 py-1.5 text-left text-[#E6EDF3] hover:bg-[#252A35] flex items-center gap-2 cursor-pointer"
+                          >
+                            <Power className="w-3 h-3 text-[#F59E0B]" />
+                            <span>{node.bypassed ? 'Enable Node' : 'Bypass Node'}</span>
                           </button>
                         )}
                         <button
@@ -528,6 +597,12 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                   if (node.type === 'osd_canvas') {
                     e.stopPropagation();
                     onOpenOSDEditor(node.id);
+                  } else if (node.type === 'warp_perspective' || node.type === 'crop_roi') {
+                    e.stopPropagation();
+                    onOpenGeometryEditor(node.id);
+                  } else if (node.type === 'webcam_input') {
+                    e.stopPropagation();
+                    onToggleWebcam();
                   }
                 }}
                 className={`mx-2 mb-2 rounded-[4px] overflow-hidden relative border border-[#222730] flex items-center justify-center ${
@@ -546,10 +621,18 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                   <span className="text-[10px] text-[#636B76] font-mono-tabular">Pending</span>
                 )}
 
-                {/* Timing + Cache Pill Overlay (top-right inside thumbnail) */}
+                {/* Timing + Cache / Bypass Pill Overlay (top-right inside thumbnail) */}
                 {res && (
-                  <div className="absolute top-1 right-1 px-1.5 py-[1px] rounded-[3px] bg-[#0B2216]/85 border border-[#1E6B45]/75 text-[#4ADE80] text-[8.5px] font-mono-tabular leading-tight pointer-events-none">
-                    {res.durationMs.toFixed(1)}ms{res.cached ? ' · cache' : ''}
+                  <div
+                    className={`absolute top-1 right-1 px-1.5 py-[1px] rounded-[3px] text-[8.5px] font-mono-tabular leading-tight pointer-events-none ${
+                      node.bypassed
+                        ? 'bg-[#291E0B]/90 border border-[#B45309]/80 text-[#FBBF24]'
+                        : 'bg-[#0B2216]/85 border border-[#1E6B45]/75 text-[#4ADE80]'
+                    }`}
+                  >
+                    {node.bypassed
+                      ? 'BYPASS'
+                      : `${res.durationMs.toFixed(1)}ms${res.cached ? ' · cache' : ''}`}
                   </div>
                 )}
 
@@ -566,6 +649,46 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                   >
                     <Paintbrush className="w-2.5 h-2.5" />
                     <span>OSD</span>
+                  </button>
+                )}
+
+                {/* Quick Visual Corner / ROI Picker Button */}
+                {(node.type === 'warp_perspective' || node.type === 'crop_roi') && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenGeometryEditor(node.id);
+                    }}
+                    className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-[#2DD4BF] hover:bg-[#5EEAD4] text-[#0B0D10] text-[9px] font-semibold flex items-center gap-1 shadow cursor-pointer"
+                  >
+                    {node.type === 'warp_perspective' ? (
+                      <Move className="w-2.5 h-2.5" />
+                    ) : (
+                      <Crop className="w-2.5 h-2.5" />
+                    )}
+                    <span>Pick</span>
+                  </button>
+                )}
+
+                {/* Quick Webcam Live Toggle */}
+                {node.type === 'webcam_input' && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleWebcam();
+                    }}
+                    className={`absolute bottom-1 right-1 px-1.5 py-0.5 rounded text-[9px] font-semibold flex items-center gap-1 shadow cursor-pointer ${
+                      webcamActive
+                        ? 'bg-[#F43F5E] text-white'
+                        : 'bg-[#389E82] hover:bg-[#4ADE80] text-[#0B0D10]'
+                    }`}
+                  >
+                    <Camera className="w-2.5 h-2.5" />
+                    <span>{webcamActive ? 'Stop' : 'Live'}</span>
                   </button>
                 )}
               </div>

@@ -1,5 +1,6 @@
 import { NODE_CATALOG_MAP } from '../data/nodeCatalog';
 import {
+  BatchSampleResult,
   ExecutionLogEntry,
   NodeExecutionResult,
   OSDElement,
@@ -1803,6 +1804,418 @@ function applyPCAEigen(cv: any, src: ImageData, components = 1, mode = 'reconstr
 }
 
 // ============================================================================
+// CLASSICAL FEATURE, FREQUENCY & GRABCUT NODES (100% window.cv)
+// ============================================================================
+
+function applyHoughLinesP(
+  cv: any,
+  src: ImageData,
+  cannyLow = 50,
+  cannyHigh = 150,
+  threshold = 40,
+  minLineLength = 28,
+  maxLineGap = 10,
+  overlayOnSource = true,
+  lineColor = '#38BDF8'
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const gray = new cv.Mat();
+  const edges = new cv.Mat();
+  const lines = new cv.Mat();
+  const outMat = overlayOnSource
+    ? rgb.clone()
+    : new cv.Mat(src.height, src.width, cv.CV_8UC3, new cv.Scalar(9, 11, 14));
+  const [cr, cg, cb] = hexToRgb(lineColor);
+  try {
+    cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+    cv.Canny(gray, edges, Math.min(cannyLow, cannyHigh), Math.max(cannyLow, cannyHigh), 3, false);
+    cv.HoughLinesP(
+      edges,
+      lines,
+      1,
+      Math.PI / 180,
+      Math.max(5, Math.round(threshold)),
+      Math.max(2, minLineLength),
+      Math.max(1, maxLineGap)
+    );
+    const data = lines.data32S;
+    const count = Math.min(250, Math.floor(data.length / 4));
+    for (let i = 0; i < count; i++) {
+      const off = i * 4;
+      cv.line(
+        outMat,
+        new cv.Point(data[off], data[off + 1]),
+        new cv.Point(data[off + 2], data[off + 3]),
+        new cv.Scalar(cr, cg, cb),
+        2,
+        cv.LINE_AA
+      );
+    }
+    return matToImageData(cv, outMat);
+  } finally {
+    rgb.delete();
+    gray.delete();
+    edges.delete();
+    lines.delete();
+    outMat.delete();
+  }
+}
+
+function applyHoughCircles(
+  cv: any,
+  src: ImageData,
+  minDist = 24,
+  param1 = 100,
+  param2 = 28,
+  minRadius = 6,
+  maxRadius = 80,
+  circleColor = '#F58220'
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const circles = new cv.Mat();
+  const [cr, cg, cb] = hexToRgb(circleColor);
+  try {
+    cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 1.4, 0, cv.BORDER_DEFAULT);
+    cv.HoughCircles(
+      blurred,
+      circles,
+      cv.HOUGH_GRADIENT,
+      1,
+      Math.max(4, minDist),
+      Math.max(10, param1),
+      Math.max(8, param2),
+      Math.max(1, Math.round(minRadius)),
+      Math.max(Math.round(minRadius) + 2, Math.round(maxRadius))
+    );
+    const data = circles.data32F;
+    const count = Math.min(80, Math.floor(data.length / 3));
+    for (let i = 0; i < count; i++) {
+      const off = i * 3;
+      const cx = Math.round(data[off]);
+      const cy = Math.round(data[off + 1]);
+      const r = Math.max(2, Math.round(data[off + 2]));
+      cv.circle(rgb, new cv.Point(cx, cy), r, new cv.Scalar(cr, cg, cb), 2, cv.LINE_AA);
+      cv.circle(rgb, new cv.Point(cx, cy), 2, new cv.Scalar(34, 197, 94), -1, cv.LINE_AA);
+    }
+    return matToImageData(cv, rgb);
+  } finally {
+    rgb.delete();
+    gray.delete();
+    blurred.delete();
+    circles.delete();
+  }
+}
+
+function applyOrbFeatures(
+  cv: any,
+  src: ImageData,
+  maxFeatures = 250,
+  drawRich = true,
+  markerColor = '#10B981'
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const gray = new cv.Mat();
+  const orb = new cv.ORB(Math.max(10, Math.round(maxFeatures)));
+  const kps = new cv.KeyPointVector();
+  const emptyMask = new cv.Mat();
+  const outRgb = rgb.clone();
+  const [cr, cg, cb] = hexToRgb(markerColor);
+  try {
+    cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+    orb.detect(gray, kps, emptyMask);
+    const col = new cv.Scalar(cr, cg, cb, 255);
+    if (cv.drawKeypoints && typeof cv.DrawMatchesFlags_DRAW_RICH_KEYPOINTS === 'number') {
+      const flag = drawRich
+        ? cv.DrawMatchesFlags_DRAW_RICH_KEYPOINTS
+        : (cv.DrawMatchesFlags_DEFAULT ?? 0);
+      cv.drawKeypoints(rgb, kps, outRgb, col, flag);
+    } else {
+      for (let i = 0; i < kps.size(); i++) {
+        const kp = kps.get(i);
+        const cx = Math.round(kp.pt.x);
+        const cy = Math.round(kp.pt.y);
+        const rad = drawRich ? Math.max(3, Math.min(18, Math.round((kp.size || 8) * 0.35))) : 3;
+        cv.circle(outRgb, new cv.Point(cx, cy), rad, col, 1, cv.LINE_AA);
+        if (drawRich && typeof kp.angle === 'number' && kp.angle >= 0) {
+          const ang = (kp.angle * Math.PI) / 180;
+          cv.line(
+            outRgb,
+            new cv.Point(cx, cy),
+            new cv.Point(Math.round(cx + Math.cos(ang) * rad), Math.round(cy + Math.sin(ang) * rad)),
+            col,
+            1,
+            cv.LINE_AA
+          );
+        }
+      }
+    }
+    return matToImageData(cv, outRgb);
+  } finally {
+    rgb.delete();
+    gray.delete();
+    orb.delete();
+    kps.delete();
+    emptyMask.delete();
+    outRgb.delete();
+  }
+}
+
+function applyDftSpectrum(
+  cv: any,
+  src: ImageData,
+  centerShift = true,
+  colormap = 'inferno'
+): ImageData {
+  const gray = imageDataToGrayMat(cv, src);
+  const optRows = cv.getOptimalDFTSize(gray.rows);
+  const optCols = cv.getOptimalDFTSize(gray.cols);
+  const padded = new cv.Mat();
+  const floatGray = new cv.Mat();
+  const planes = new cv.MatVector();
+  const zeros = cv.Mat.zeros(optRows, optCols, cv.CV_32F);
+  const complexI = new cv.Mat();
+  const splitPlanes = new cv.MatVector();
+  const mag = new cv.Mat();
+  const ones = cv.Mat.ones(optRows, optCols, cv.CV_32F);
+  const magCrop = new cv.Mat();
+  const normU8 = new cv.Mat();
+  const outResized = new cv.Mat();
+  const cmBgr = new cv.Mat();
+  const rgbaOut = new cv.Mat();
+
+  try {
+    cv.copyMakeBorder(
+      gray,
+      padded,
+      0,
+      optRows - gray.rows,
+      0,
+      optCols - gray.cols,
+      cv.BORDER_CONSTANT,
+      new cv.Scalar(0, 0, 0, 0)
+    );
+    padded.convertTo(floatGray, cv.CV_32F);
+    planes.push_back(floatGray);
+    planes.push_back(zeros);
+    cv.merge(planes, complexI);
+    cv.dft(complexI, complexI);
+    cv.split(complexI, splitPlanes);
+
+    const re = splitPlanes.get(0);
+    const im = splitPlanes.get(1);
+    cv.magnitude(re, im, mag);
+    re.delete();
+    im.delete();
+
+    cv.add(mag, ones, mag);
+    cv.log(mag, mag);
+
+    const evenRows = mag.rows & -2;
+    const evenCols = mag.cols & -2;
+    const roiCrop = mag.roi(new cv.Rect(0, 0, evenCols, evenRows));
+    roiCrop.copyTo(magCrop);
+    roiCrop.delete();
+
+    if (centerShift) {
+      const cx = Math.floor(magCrop.cols / 2);
+      const cy = Math.floor(magCrop.rows / 2);
+      const q0 = magCrop.roi(new cv.Rect(0, 0, cx, cy));
+      const q1 = magCrop.roi(new cv.Rect(cx, 0, cx, cy));
+      const q2 = magCrop.roi(new cv.Rect(0, cy, cx, cy));
+      const q3 = magCrop.roi(new cv.Rect(cx, cy, cx, cy));
+      const tmp = new cv.Mat();
+      q0.copyTo(tmp);
+      q3.copyTo(q0);
+      tmp.copyTo(q3);
+      q1.copyTo(tmp);
+      q2.copyTo(q1);
+      tmp.copyTo(q2);
+      tmp.delete();
+      q0.delete();
+      q1.delete();
+      q2.delete();
+      q3.delete();
+    }
+
+    cv.normalize(magCrop, normU8, 0, 255, cv.NORM_MINMAX, cv.CV_8U);
+    cv.resize(normU8, outResized, new cv.Size(src.width, src.height), 0, 0, cv.INTER_LINEAR);
+
+    if (colormap === 'gray') {
+      return matToImageData(cv, outResized);
+    }
+
+    const code =
+      colormap === 'turbo'
+        ? cv.COLORMAP_TURBO
+        : colormap === 'viridis'
+          ? cv.COLORMAP_VIRIDIS
+          : cv.COLORMAP_INFERNO;
+    cv.applyColorMap(outResized, cmBgr, code);
+    cv.cvtColor(cmBgr, rgbaOut, cv.COLOR_BGR2RGBA);
+    return matToImageData(cv, rgbaOut);
+  } finally {
+    gray.delete();
+    padded.delete();
+    floatGray.delete();
+    planes.delete();
+    zeros.delete();
+    complexI.delete();
+    splitPlanes.delete();
+    mag.delete();
+    ones.delete();
+    magCrop.delete();
+    normU8.delete();
+    outResized.delete();
+    cmBgr.delete();
+    rgbaOut.delete();
+  }
+}
+
+function applyGrabCut(
+  cv: any,
+  src: ImageData,
+  marginPct = 10,
+  iterations = 2,
+  outputMode = 'foreground'
+): ImageData {
+  const rgb = imageDataToRgbMat(cv, src);
+  const maxDim = Math.max(src.width, src.height);
+  const scale = maxDim > 220 ? 220 / maxDim : 1;
+  const sw = Math.max(32, Math.round(src.width * scale));
+  const sh = Math.max(32, Math.round(src.height * scale));
+
+  const smallRgb = new cv.Mat();
+  const gcMask = new cv.Mat(sh, sw, cv.CV_8UC1, new cv.Scalar(0));
+  const bgdModel = new cv.Mat();
+  const fgdModel = new cv.Mat();
+  const fgBinSmall = new cv.Mat(sh, sw, cv.CV_8UC1, new cv.Scalar(0));
+  const fgBinFull = new cv.Mat();
+  const outRgb = new cv.Mat(src.height, src.width, cv.CV_8UC3, new cv.Scalar(9, 11, 14));
+
+  try {
+    if (scale < 1) {
+      cv.resize(rgb, smallRgb, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+    } else {
+      rgb.copyTo(smallRgb);
+    }
+
+    const m = Math.max(0.02, Math.min(0.4, marginPct / 100));
+    const rx = Math.max(1, Math.round(sw * m));
+    const ry = Math.max(1, Math.round(sh * m));
+    const rw = Math.max(8, sw - rx * 2);
+    const rh = Math.max(8, sh - ry * 2);
+    const rect = new cv.Rect(rx, ry, rw, rh);
+
+    cv.grabCut(
+      smallRgb,
+      gcMask,
+      rect,
+      bgdModel,
+      fgdModel,
+      Math.max(1, Math.min(5, Math.round(iterations))),
+      cv.GC_INIT_WITH_RECT
+    );
+
+    const gData = gcMask.data;
+    const fData = fgBinSmall.data;
+    for (let i = 0; i < gData.length; i++) {
+      // cv.GC_FGD = 1, cv.GC_PR_FGD = 3
+      fData[i] = gData[i] === 1 || gData[i] === 3 ? 255 : 0;
+    }
+
+    if (scale < 1) {
+      cv.resize(fgBinSmall, fgBinFull, new cv.Size(src.width, src.height), 0, 0, cv.INTER_NEAREST);
+    } else {
+      fgBinSmall.copyTo(fgBinFull);
+    }
+
+    if (outputMode === 'mask') {
+      return matToImageData(cv, fgBinFull);
+    }
+
+    if (outputMode === 'overlay') {
+      rgb.convertTo(outRgb, -1, 0.35, 0);
+      rgb.copyTo(outRgb, fgBinFull);
+      const bx = Math.round(src.width * m);
+      const by = Math.round(src.height * m);
+      const bw = Math.max(8, src.width - bx * 2);
+      const bh = Math.max(8, src.height - by * 2);
+      cv.rectangle(
+        outRgb,
+        new cv.Point(bx, by),
+        new cv.Point(bx + bw, by + bh),
+        new cv.Scalar(245, 130, 32),
+        2,
+        cv.LINE_AA
+      );
+      return matToImageData(cv, outRgb);
+    }
+
+    rgb.copyTo(outRgb, fgBinFull);
+    return matToImageData(cv, outRgb);
+  } finally {
+    rgb.delete();
+    smallRgb.delete();
+    gcMask.delete();
+    bgdModel.delete();
+    fgdModel.delete();
+    fgBinSmall.delete();
+    fgBinFull.delete();
+    outRgb.delete();
+  }
+}
+
+function buildWebcamStandbyFrame(cv: any, w = 360, h = 270): ImageData {
+  const mat = new cv.Mat(h, w, cv.CV_8UC3, new cv.Scalar(13, 17, 23));
+  try {
+    cv.rectangle(mat, new cv.Point(10, 10), new cv.Point(w - 10, h - 10), new cv.Scalar(42, 50, 62), 1, cv.LINE_AA);
+    cv.circle(mat, new cv.Point(Math.round(w / 2), Math.round(h / 2) - 14), 26, new cv.Scalar(56, 158, 130), 2, cv.LINE_AA);
+    cv.circle(mat, new cv.Point(Math.round(w / 2), Math.round(h / 2) - 14), 8, new cv.Scalar(245, 130, 32), -1, cv.LINE_AA);
+    cv.putText(mat, 'WEBCAM STANDBY', new cv.Point(Math.round(w / 2) - 82, Math.round(h / 2) + 34), cv.FONT_HERSHEY_SIMPLEX, 0.55, new cv.Scalar(230, 237, 243), 1, cv.LINE_AA);
+    cv.putText(mat, 'Start camera in Inspector', new cv.Point(Math.round(w / 2) - 96, Math.round(h / 2) + 58), cv.FONT_HERSHEY_SIMPLEX, 0.42, new cv.Scalar(139, 148, 158), 1, cv.LINE_AA);
+    return matToImageData(cv, mat);
+  } finally {
+    mat.delete();
+  }
+}
+
+export function previewPerspectiveWithOpenCV(
+  src: ImageData,
+  params: Record<string, unknown>
+): ImageData {
+  const cv = getCv();
+  return applyWarpPerspective(cv, src, params);
+}
+
+export function previewCropWithOpenCV(
+  src: ImageData,
+  params: Record<string, unknown>
+): ImageData {
+  const cv = getCv();
+  const xPct = Number(params.x ?? 15) / 100;
+  const yPct = Number(params.y ?? 15) / 100;
+  const wPct = Number(params.w ?? 70) / 100;
+  const hPct = Number(params.h ?? 70) / 100;
+  const sx = Math.max(0, Math.min(src.width - 24, Math.round(src.width * xPct)));
+  const sy = Math.max(0, Math.min(src.height - 24, Math.round(src.height * yPct)));
+  const cw = Math.max(24, Math.min(src.width - sx, Math.round(src.width * wPct)));
+  const ch = Math.max(24, Math.min(src.height - sy, Math.round(src.height * hPct)));
+  const mat = cv.matFromImageData(src);
+  const roi = mat.roi(new cv.Rect(sx, sy, cw, ch));
+  const copied = roi.clone();
+  try {
+    return matToImageData(cv, copied);
+  } finally {
+    mat.delete();
+    roi.delete();
+    copied.delete();
+  }
+}
+
+// ============================================================================
 // OPENCV OSD DRAWING (100% window.cv)
 // ============================================================================
 
@@ -2039,12 +2452,14 @@ export async function executePipeline(options: {
   edges: PipelineEdge[];
   seed: number;
   stopAtNodeId?: string;
+  webcamFrameData?: ImageData | null;
+  skipCache?: boolean;
 }): Promise<{
   results: Record<string, NodeExecutionResult>;
   logs: ExecutionLogEntry[];
   totalMs: number;
 }> {
-  const { nodes, edges, seed, stopAtNodeId } = options;
+  const { nodes, edges, seed, stopAtNodeId, webcamFrameData, skipCache } = options;
   const order = getTopologicalOrder(nodes, edges, stopAtNodeId);
   const results: Record<string, NodeExecutionResult> = {};
   const logs: ExecutionLogEntry[] = [];
@@ -2066,39 +2481,65 @@ export async function executePipeline(options: {
   for (const node of order) {
     const meta = NODE_CATALOG_MAP[node.type];
     const opName = node.type;
-    logs.push({
-      id: `${node.id}-start-${Date.now()}-${Math.random()}`,
-      message: `Executing ${opName} [cv.Mat]`,
-      kind: 'info',
-      timestamp: Date.now(),
-    });
+    const isBypassed = Boolean(node.bypassed);
+
+    if (!isBypassed) {
+      logs.push({
+        id: `${node.id}-start-${Date.now()}-${Math.random()}`,
+        message: `Executing ${opName} [cv.Mat]`,
+        kind: 'info',
+        timestamp: Date.now(),
+      });
+    }
 
     const incoming = incomingEdgesByNode.get(node.id) || [];
     const inputMap: Record<string, ImageData | undefined> = {};
+    const inputSourceIdMap: Record<string, string | undefined> = {};
     const inputSigParts: string[] = [];
 
     for (const edge of incoming) {
       const sourceRes = results[edge.source];
       if (sourceRes?.imageData) {
         inputMap[edge.targetHandle] = sourceRes.imageData;
+        inputSourceIdMap[edge.targetHandle] = edge.source;
         inputSigParts.push(
           `${edge.targetHandle}:${edge.source}:${sourceRes.durationMs}:${sourceRes.previewDataUrl.length}`
         );
       }
     }
 
+    const primaryInputSourceId =
+      inputSourceIdMap.image ||
+      inputSourceIdMap.a ||
+      inputSourceIdMap.mask ||
+      Object.values(inputSourceIdMap).find(Boolean);
+    const inputPreviewDataUrl = primaryInputSourceId
+      ? results[primaryInputSourceId]?.previewDataUrl
+      : undefined;
+    const primaryInput =
+      inputMap.image ||
+      inputMap.a ||
+      inputMap.mask ||
+      Object.values(inputMap).find(Boolean) ||
+      defaultLena;
+
+    const isLiveWebcam = node.type === 'webcam_input' && Boolean(webcamFrameData);
+
     const signature = JSON.stringify({
       type: node.type,
       params: node.params,
+      bypassed: isBypassed,
       seed: meta?.isRandom ? seed : 0,
       inputs: inputSigParts.sort(),
     });
 
-    const cached = executionCache.get(node.id);
+    const cached = !skipCache && !isLiveWebcam ? executionCache.get(node.id) : undefined;
     if (cached && cached.signature === signature) {
       const res: NodeExecutionResult = {
         ...cached.result,
         cached: true,
+        inputPreviewDataUrl: inputPreviewDataUrl ?? cached.result.inputPreviewDataUrl,
+        inputImageData: primaryInputSourceId ? primaryInput : cached.result.inputImageData,
       };
       results[node.id] = res;
       totalMs += res.durationMs;
@@ -2114,7 +2555,9 @@ export async function executePipeline(options: {
     const t0 = performance.now();
     let outImage: ImageData;
 
-    if (node.type === 'load_image') {
+    if (isBypassed && node.type !== 'load_image' && node.type !== 'webcam_input') {
+      outImage = cloneImageDataViaCv(cv, primaryInput);
+    } else if (node.type === 'load_image') {
       const customUrl = String(node.params.customDataUrl || '');
       let rawImg: ImageData;
       if (customUrl) {
@@ -2128,10 +2571,14 @@ export async function executePipeline(options: {
       }
       // Marshal through cv.matFromImageData -> cv.Mat
       outImage = cloneImageDataViaCv(cv, rawImg);
+    } else if (node.type === 'webcam_input') {
+      if (webcamFrameData) {
+        outImage = cloneImageDataViaCv(cv, webcamFrameData);
+      } else {
+        const resParts = String(node.params.resolution || '360x270').split('x').map(Number);
+        outImage = buildWebcamStandbyFrame(cv, resParts[0] || 360, resParts[1] || 270);
+      }
     } else {
-      const primaryInput =
-        inputMap.image || inputMap.a || inputMap.mask || Object.values(inputMap).find(Boolean) || defaultLena;
-
       switch (node.type) {
         case 'clahe':
         case 'albu_clahe':
@@ -2269,6 +2716,57 @@ export async function executePipeline(options: {
             Number(node.params.maxCorners ?? 45),
             Number(node.params.threshold ?? 35),
             String(node.params.color || '#F58220')
+          );
+          break;
+        case 'hough_lines':
+          outImage = applyHoughLinesP(
+            cv,
+            primaryInput,
+            Number(node.params.cannyLow ?? 50),
+            Number(node.params.cannyHigh ?? 150),
+            Number(node.params.threshold ?? 40),
+            Number(node.params.minLineLength ?? 28),
+            Number(node.params.maxLineGap ?? 10),
+            node.params.overlayOnSource !== false,
+            String(node.params.lineColor || '#38BDF8')
+          );
+          break;
+        case 'hough_circles':
+          outImage = applyHoughCircles(
+            cv,
+            primaryInput,
+            Number(node.params.minDist ?? 24),
+            Number(node.params.param1 ?? 100),
+            Number(node.params.param2 ?? 28),
+            Number(node.params.minRadius ?? 6),
+            Number(node.params.maxRadius ?? 80),
+            String(node.params.circleColor || '#F58220')
+          );
+          break;
+        case 'orb_features':
+          outImage = applyOrbFeatures(
+            cv,
+            primaryInput,
+            Number(node.params.maxFeatures ?? 250),
+            node.params.drawRich !== false,
+            String(node.params.markerColor || '#10B981')
+          );
+          break;
+        case 'dft_spectrum':
+          outImage = applyDftSpectrum(
+            cv,
+            primaryInput,
+            node.params.centerShift !== false,
+            String(node.params.colormap || 'inferno')
+          );
+          break;
+        case 'grabcut':
+          outImage = applyGrabCut(
+            cv,
+            primaryInput,
+            Number(node.params.marginPct ?? 10),
+            Number(node.params.iterations ?? 2),
+            String(node.params.outputMode || 'foreground')
           );
           break;
         case 'dilate':
@@ -2543,7 +3041,7 @@ export async function executePipeline(options: {
       }
     }
 
-    const durationMs = Math.max(0.5, performance.now() - t0);
+    const durationMs = isBypassed ? 0.2 : Math.max(0.5, performance.now() - t0);
     totalMs += durationMs;
 
     const result: NodeExecutionResult = {
@@ -2561,15 +3059,22 @@ export async function executePipeline(options: {
           : 3,
       durationMs,
       cached: false,
+      bypassed: isBypassed,
       imageData: outImage,
+      inputPreviewDataUrl,
+      inputImageData: primaryInputSourceId ? primaryInput : undefined,
     };
 
-    executionCache.set(node.id, { signature, result });
+    if (!isLiveWebcam && !skipCache) {
+      executionCache.set(node.id, { signature, result });
+    }
     results[node.id] = result;
     logs.push({
       id: `${node.id}-done-${Date.now()}-${Math.random()}`,
-      message: `Finished ${opName} in ${durationMs.toFixed(1)}ms`,
-      kind: 'success',
+      message: isBypassed
+        ? `Bypassed ${opName} (pass-through)`
+        : `Finished ${opName} in ${durationMs.toFixed(1)}ms`,
+      kind: isBypassed ? 'warn' : 'success',
       timestamp: Date.now(),
     });
   }
@@ -2582,4 +3087,40 @@ export async function executePipeline(options: {
   });
 
   return { results, logs, totalMs };
+}
+
+export async function executeBatchSamples(options: {
+  nodes: PipelineNode[];
+  edges: PipelineEdge[];
+  baseSeed: number;
+  count: number;
+  targetNodeId?: string | null;
+}): Promise<BatchSampleResult[]> {
+  const { nodes, edges, baseSeed, count, targetNodeId } = options;
+  const clamped = Math.max(1, Math.min(16, Math.round(count)));
+  const order = getTopologicalOrder(nodes, edges);
+  const resolvedTargetId = targetNodeId || order[order.length - 1]?.id;
+  if (!resolvedTargetId) return [];
+
+  const batch: BatchSampleResult[] = [];
+  for (let i = 0; i < clamped; i++) {
+    const s = baseSeed + i;
+    const exec = await executePipeline({
+      nodes,
+      edges,
+      seed: s,
+      stopAtNodeId: targetNodeId || undefined,
+    });
+    const res = exec.results[resolvedTargetId];
+    if (res) {
+      batch.push({
+        seed: s,
+        previewDataUrl: res.previewDataUrl,
+        width: res.width,
+        height: res.height,
+        durationMs: exec.totalMs,
+      });
+    }
+  }
+  return batch;
 }

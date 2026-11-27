@@ -25,7 +25,8 @@ export type ParamType =
   | 'text'
   | 'color'
   | 'image_source'
-  | 'osd_layers';
+  | 'osd_layers'
+  | 'webcam_control';
 
 export interface ParamOption {
   label: string;
@@ -92,6 +93,7 @@ export interface PipelineNode {
   type: string;
   position: { x: number; y: number };
   params: Record<string, unknown>;
+  bypassed?: boolean;
 }
 
 export interface PipelineEdge {
@@ -110,7 +112,18 @@ export interface NodeExecutionResult {
   channels: number;
   durationMs: number;
   cached: boolean;
+  bypassed?: boolean;
   imageData?: ImageData;
+  inputPreviewDataUrl?: string;
+  inputImageData?: ImageData;
+}
+
+export interface BatchSampleResult {
+  seed: number;
+  previewDataUrl: string;
+  width: number;
+  height: number;
+  durationMs: number;
 }
 
 export interface ExecutionLogEntry {

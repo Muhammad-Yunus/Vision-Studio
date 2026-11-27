@@ -1,18 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Camera,
   ChevronDown,
   Download,
   FileCode2,
   FolderOpen,
+  Grid,
   Image as ImageIcon,
   Info,
   Layers,
   PanelLeft,
   PanelRight,
   Play,
+  Redo2,
   SlidersHorizontal,
   Sparkles,
+  Undo2,
   Wand2,
+  Workflow,
 } from 'lucide-react';
 import { PIPELINE_TEMPLATES } from '../data/templates';
 import { PipelineTemplate } from '../types/pipeline';
@@ -28,6 +33,14 @@ interface TopBarProps {
   onRunToSelected: () => void;
   hasSelectedNode: boolean;
   isRunning: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
+  onAutoLayout: () => void;
+  onOpenBatchModal: () => void;
+  webcamActive: boolean;
+  webcamFps: number;
   onSelectTemplate: (template: PipelineTemplate) => void;
   onLoadJsonFile: (file: File) => void;
   onExportPython: () => void;
@@ -53,6 +66,14 @@ export const TopBar: React.FC<TopBarProps> = ({
   onRunToSelected,
   hasSelectedNode,
   isRunning,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  onAutoLayout,
+  onOpenBatchModal,
+  webcamActive,
+  webcamFps,
   onSelectTemplate,
   onLoadJsonFile,
   onExportPython,
@@ -83,10 +104,10 @@ export const TopBar: React.FC<TopBarProps> = ({
   return (
     <header
       ref={menuRef}
-      className="relative z-40 flex items-center justify-between gap-2 sm:gap-4 px-3 sm:px-4 h-14 bg-[#121417] border-b border-[#22262C] select-none shrink-0"
+      className="relative z-40 flex items-center justify-between gap-2 sm:gap-3 px-3 sm:px-4 h-14 bg-[#121417] border-b border-[#22262C] select-none shrink-0"
     >
-      {/* Left Zone: Brand Lockup + Info + NODES/LINKS Counters */}
-      <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+      {/* Left Zone: Brand Lockup + Info + NODES/LINKS Counters + Graph History/Layout */}
+      <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
         {/* Mobile/Tablet Left Sidebar Toggle */}
         <button
           type="button"
@@ -132,7 +153,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             type="button"
             onClick={() => setOpenMenu(openMenu === 'info' ? null : 'info')}
             aria-label="Pipeline info"
-            className="w-7 h-7 rounded-[6px] border border-[#262A31] bg-[#171A1F] hover:bg-[#1E232B] text-[#8B949E] hover:text-white flex items-center justify-center transition-colors"
+            className="w-7 h-7 rounded-[6px] border border-[#262A31] bg-[#171A1F] hover:bg-[#1E232B] text-[#8B949E] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
           >
             <Info className="w-3.5 h-3.5" />
           </button>
@@ -142,24 +163,24 @@ export const TopBar: React.FC<TopBarProps> = ({
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-white text-sm">Vision Studio</span>
                 <span className="font-mono-tabular text-[11px] text-[#7AB89E]">
-                  {wasmReady ? 'OpenCV.js WASM Active' : 'JS Pixel Engine Active'}
+                  {wasmReady ? 'OpenCV.js WASM Active' : 'Initializing WASM...'}
                 </span>
               </div>
               <p className="text-[#8B949E] leading-relaxed">
                 Drag nodes from the left library onto the canvas, connect ports to build an OpenCV DAG pipeline, and edit On-Screen Display overlays with the interactive drag-and-drop OSD Canvas Editor.
               </p>
               <div className="pt-2 border-t border-[#242932] grid grid-cols-2 gap-1.5 text-[11px] text-[#8B949E]">
-                <span>Scroll: Zoom Canvas</span>
-                <span>Drag BG: Pan View</span>
+                <span>Ctrl+Z / Ctrl+Y: Undo/Redo</span>
+                <span>Key M: Bypass Node</span>
                 <span>Click ×: Unlink Edge</span>
-                <span>Double-click: Drop Node</span>
+                <span>Double-click: Edit OSD/ROI</span>
               </div>
             </div>
           )}
         </div>
 
         {/* NODES & LINKS Metric Counters */}
-        <div className="hidden md:flex items-center gap-1.5 ml-1">
+        <div className="hidden md:flex items-center gap-1.5">
           <div className="flex items-center gap-2 px-2.5 py-1 rounded-[6px] bg-[#16191E] border border-[#242830]">
             <span className="text-[10px] font-semibold tracking-wider text-[#7D8590]">NODES</span>
             <span className="text-[12px] font-semibold text-white font-mono-tabular">{nodeCount}</span>
@@ -169,13 +190,51 @@ export const TopBar: React.FC<TopBarProps> = ({
             <span className="text-[12px] font-semibold text-white font-mono-tabular">{linkCount}</span>
           </div>
         </div>
+
+        {/* Compact Undo / Redo / Auto-Layout Controls */}
+        <div className="hidden sm:flex items-center gap-1 ml-0.5">
+          <button
+            type="button"
+            onClick={onUndo}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z)"
+            className="w-7 h-7 rounded-[6px] border border-[#262A31] bg-[#171A1F] hover:bg-[#1E232B] disabled:opacity-35 text-[#9CA3AF] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onRedo}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Y)"
+            className="w-7 h-7 rounded-[6px] border border-[#262A31] bg-[#171A1F] hover:bg-[#1E232B] disabled:opacity-35 text-[#9CA3AF] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+          >
+            <Redo2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onAutoLayout}
+            disabled={nodeCount === 0}
+            title="Auto-Layout DAG"
+            className="w-7 h-7 rounded-[6px] border border-[#262A31] bg-[#171A1F] hover:bg-[#1E232B] disabled:opacity-35 text-[#9CA3AF] hover:text-[#389E82] flex items-center justify-center transition-colors cursor-pointer"
+          >
+            <Workflow className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {webcamActive && (
+          <div className="hidden lg:flex items-center gap-1.5 px-2 py-1 rounded-[6px] bg-[#1B1214] border border-[#F43F5E]/40 text-[#FDA4AF] text-[11px] font-mono-tabular">
+            <Camera className="w-3 h-3 text-[#F43F5E]" />
+            <span>LIVE {webcamFps} FPS</span>
+          </div>
+        )}
       </div>
 
       {/* Right Zone: Seed/Samples + Run Controls + Templates/Load/Export */}
       <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
         {/* Seed & Samples Inputs */}
-        <div className="hidden xl:flex items-center gap-2 mr-1">
-          <label className="flex flex-col bg-[#16191E] border border-[#262A31] rounded-[6px] px-2.5 py-0.5 w-[76px] focus-within:border-[#3A424E]">
+        <div className="hidden xl:flex items-center gap-1.5 mr-0.5">
+          <label className="flex flex-col bg-[#16191E] border border-[#262A31] rounded-[6px] px-2.5 py-0.5 w-[72px] focus-within:border-[#3A424E]">
             <span className="text-[9px] text-[#7D8590] leading-tight">Seed</span>
             <input
               type="number"
@@ -184,17 +243,28 @@ export const TopBar: React.FC<TopBarProps> = ({
               className="bg-transparent text-[12px] font-mono-tabular text-white outline-none w-full leading-tight"
             />
           </label>
-          <label className="flex flex-col bg-[#16191E] border border-[#262A31] rounded-[6px] px-2.5 py-0.5 w-[76px] focus-within:border-[#3A424E]">
+          <label className="flex flex-col bg-[#16191E] border border-[#262A31] rounded-[6px] px-2.5 py-0.5 w-[72px] focus-within:border-[#3A424E]">
             <span className="text-[9px] text-[#7D8590] leading-tight">Samples</span>
             <input
               type="number"
               min={1}
               max={16}
               value={samples}
-              onChange={(e) => onSamplesChange(Math.max(1, Number(e.target.value) || 1))}
+              onChange={(e) => onSamplesChange(Math.min(16, Math.max(1, Number(e.target.value) || 1)))}
               className="bg-transparent text-[12px] font-mono-tabular text-white outline-none w-full leading-tight"
             />
           </label>
+          {samples > 1 && (
+            <button
+              type="button"
+              onClick={onOpenBatchModal}
+              title="Open Multi-Seed Batch Grid"
+              className="h-8 px-2 rounded-[6px] bg-[#181B20] hover:bg-[#22262E] border border-[#F58220]/45 text-[#FDBA74] text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <Grid className="w-3.5 h-3.5 text-[#F58220]" />
+              <span>Batch</span>
+            </button>
+          )}
         </div>
 
         {/* Primary Run CTA (Vivid Amber-Orange with Dark Label) */}
@@ -205,7 +275,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-[6px] bg-[#F58220] hover:bg-[#FF9130] active:bg-[#E07316] disabled:opacity-60 text-[#0B0D10] font-semibold text-[13px] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <Play className="w-3.5 h-3.5 fill-[#0B0D10]" />
-          <span>Run</span>
+          <span>{samples > 1 ? `Run ×${samples}` : 'Run'}</span>
         </button>
 
         {/* Run to selected */}

@@ -559,6 +559,75 @@ export const NODE_CATALOG: NodeCatalogItem[] = [
       { key: 'color', label: 'Marker Color', type: 'color', defaultValue: '#F58220' },
     ],
   },
+  {
+    type: 'hough_lines',
+    title: 'Hough Lines (P)',
+    category: 'analysis',
+    description: 'Probabilistic Hough line segment detector via cv.HoughLinesP.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'LINES' }],
+    params: [
+      { key: 'cannyLow', label: 'Canny Low', type: 'range', defaultValue: 50, min: 10, max: 200, step: 5 },
+      { key: 'cannyHigh', label: 'Canny High', type: 'range', defaultValue: 150, min: 40, max: 300, step: 5 },
+      { key: 'threshold', label: 'Vote Threshold', type: 'range', defaultValue: 40, min: 10, max: 150, step: 5 },
+      { key: 'minLineLength', label: 'Min Length (px)', type: 'range', defaultValue: 28, min: 5, max: 150, step: 2 },
+      { key: 'maxLineGap', label: 'Max Gap (px)', type: 'range', defaultValue: 10, min: 2, max: 50, step: 1 },
+      { key: 'overlayOnSource', label: 'Overlay On Input', type: 'boolean', defaultValue: true },
+      { key: 'lineColor', label: 'Line Color', type: 'color', defaultValue: '#38BDF8' },
+    ],
+  },
+  {
+    type: 'hough_circles',
+    title: 'Hough Circles',
+    category: 'analysis',
+    description: 'Detect circular contours via cv.HoughCircles (HOUGH_GRADIENT).',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'CIRCLES' }],
+    params: [
+      { key: 'minDist', label: 'Min Center Dist', type: 'range', defaultValue: 24, min: 8, max: 120, step: 2 },
+      { key: 'param1', label: 'Canny High (p1)', type: 'range', defaultValue: 100, min: 30, max: 250, step: 5 },
+      { key: 'param2', label: 'Accumulator (p2)', type: 'range', defaultValue: 28, min: 10, max: 100, step: 2 },
+      { key: 'minRadius', label: 'Min Radius', type: 'number', defaultValue: 6, min: 2, max: 100, step: 2 },
+      { key: 'maxRadius', label: 'Max Radius', type: 'number', defaultValue: 80, min: 10, max: 240, step: 4 },
+      { key: 'circleColor', label: 'Circle Color', type: 'color', defaultValue: '#F58220' },
+    ],
+  },
+  {
+    type: 'orb_features',
+    title: 'ORB Keypoints',
+    category: 'analysis',
+    description: 'Oriented FAST & Rotated BRIEF keypoint detector via cv.ORB.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'KEYPOINTS' }],
+    params: [
+      { key: 'maxFeatures', label: 'Max Features', type: 'range', defaultValue: 250, min: 25, max: 800, step: 25 },
+      { key: 'drawRich', label: 'Draw Size & Angle', type: 'boolean', defaultValue: true },
+      { key: 'markerColor', label: 'Keypoint Color', type: 'color', defaultValue: '#10B981' },
+    ],
+  },
+  {
+    type: 'dft_spectrum',
+    title: 'FFT / DFT Spectrum',
+    category: 'analysis',
+    description: '2D Discrete Fourier Transform log-magnitude frequency spectrum via cv.dft.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'SPECTRUM' }],
+    params: [
+      { key: 'centerShift', label: 'Center Low Frequencies', type: 'boolean', defaultValue: true },
+      {
+        key: 'colormap',
+        label: 'Visualization',
+        type: 'select',
+        defaultValue: 'inferno',
+        options: [
+          { label: 'COLORMAP_INFERNO', value: 'inferno' },
+          { label: 'COLORMAP_TURBO', value: 'turbo' },
+          { label: 'COLORMAP_VIRIDIS', value: 'viridis' },
+          { label: 'Grayscale Magnitude', value: 'gray' },
+        ],
+      },
+    ],
+  },
 
   // MATH
   {
@@ -896,6 +965,29 @@ export const NODE_CATALOG: NodeCatalogItem[] = [
       },
     ],
   },
+  {
+    type: 'grabcut',
+    title: 'GrabCut Segment',
+    category: 'ml',
+    description: 'Iterative foreground/background GMM segmentation via cv.grabCut.',
+    inputs: [{ id: 'image', label: 'IMAGE' }],
+    outputs: [{ id: 'image', label: 'SEGMENTED' }],
+    params: [
+      { key: 'marginPct', label: 'ROI Inset (%)', type: 'range', defaultValue: 10, min: 2, max: 35, step: 1 },
+      { key: 'iterations', label: 'GMM Iterations', type: 'number', defaultValue: 2, min: 1, max: 5, step: 1 },
+      {
+        key: 'outputMode',
+        label: 'Output Mode',
+        type: 'select',
+        defaultValue: 'foreground',
+        options: [
+          { label: 'Foreground Cutout', value: 'foreground' },
+          { label: 'Binary Foreground Mask', value: 'mask' },
+          { label: 'ROI Overlay', value: 'overlay' },
+        ],
+      },
+    ],
+  },
 
   // IO
   {
@@ -919,6 +1011,30 @@ export const NODE_CATALOG: NodeCatalogItem[] = [
         ],
       },
       { key: 'customDataUrl', label: 'Custom Image Data URL', type: 'text', defaultValue: '' },
+    ],
+  },
+  {
+    type: 'webcam_input',
+    title: 'Webcam Stream',
+    category: 'io',
+    description: 'Capture live browser camera frames directly into the OpenCV pipeline.',
+    inputs: [],
+    outputs: [{ id: 'image', label: 'FRAME' }],
+    params: [
+      { key: 'webcamControl', label: 'Camera Stream', type: 'webcam_control', defaultValue: 'ready' },
+      {
+        key: 'resolution',
+        label: 'Capture Size',
+        type: 'select',
+        defaultValue: '360x270',
+        options: [
+          { label: '320×240 (Fast WASM)', value: '320x240' },
+          { label: '360×270 (Balanced)', value: '360x270' },
+          { label: '480×360 (HD Detail)', value: '480x360' },
+        ],
+      },
+      { key: 'mirror', label: 'Mirror Horizontally', type: 'boolean', defaultValue: true },
+      { key: 'targetFps', label: 'Target FPS', type: 'range', defaultValue: 10, min: 3, max: 20, step: 1 },
     ],
   },
   {

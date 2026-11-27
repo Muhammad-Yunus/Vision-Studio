@@ -1,12 +1,20 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
+  Camera,
   Check,
   ChevronDown,
   Copy,
+  Crop,
   Download,
+  Grid,
   Layers,
+  Move,
   Paintbrush,
+  Power,
+  SplitSquareHorizontal,
   Upload,
+  VideoOff,
+  ZoomIn,
 } from 'lucide-react';
 import { NODE_CATALOG_MAP } from '../data/nodeCatalog';
 import { generatePythonOpenCVCode } from '../engine/codeGenerator';
@@ -23,10 +31,57 @@ interface InspectorSidebarProps {
   nodes: PipelineNode[];
   edges: PipelineEdge[];
   onUpdateParam: (nodeId: string, key: string, value: unknown) => void;
+  onToggleBypass: (nodeId: string) => void;
   onExportPython: () => void;
   onExportNodeImage: (nodeId: string) => void;
   onOpenOSDEditor: (nodeId: string) => void;
+  onOpenGeometryEditor: (nodeId: string) => void;
+  webcamActive: boolean;
+  webcamFps: number;
+  webcamError: string | null;
+  onToggleWebcam: () => void;
+  samplesCount: number;
+  onOpenBatchModal: () => void;
   className?: string;
+}
+
+interface ProbeValues {
+  x: number;
+  y: number;
+  r: number;
+  g: number;
+  b: number;
+  hCv: number;
+  sCv: number;
+  vCv: number;
+  yCbCrY: number;
+  cr: number;
+  cb: number;
+}
+
+function rgbToProbe(x: number, y: number, r: number, g: number, b: number): ProbeValues {
+  const rf = r / 255;
+  const gf = g / 255;
+  const bf = b / 255;
+  const max = Math.max(rf, gf, bf);
+  const min = Math.min(rf, gf, bf);
+  const d = max - min;
+  let h = 0;
+  if (d > 0) {
+    if (max === rf) h = 60 * (((gf - bf) / d) % 6);
+    else if (max === gf) h = 60 * ((bf - rf) / d + 2);
+    else h = 60 * ((rf - gf) / d + 4);
+  }
+  if (h < 0) h += 360;
+  const hCv = Math.round(h / 2) % 180;
+  const sCv = max === 0 ? 0 : Math.round((d / max) * 255);
+  const vCv = Math.round(max * 255);
+
+  const yVal = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+  const crVal = Math.max(0, Math.min(255, Math.round(128 + 0.713 * (r - yVal))));
+  const cbVal = Math.max(0, Math.min(255, Math.round(128 + 0.564 * (b - yVal))));
+
+  return { x, y, r, g, b, hCv, sCv, vCv, yCbCrY: yVal, cr: crVal, cb: cbVal };
 }
 
 export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
@@ -35,18 +90,33 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   nodes,
   edges,
   onUpdateParam,
+  onToggleBypass,
   onExportPython,
   onExportNodeImage,
   onOpenOSDEditor,
+  onOpenGeometryEditor,
+  webcamActive,
+  webcamFps,
+  webcamError,
+  onToggleWebcam,
+  samplesCount,
+  onOpenBatchModal,
   className = '',
 }) => {
   const [bottomTab, setBottomTab] = useState<'code' | 'results'>('code');
   const [showCodePreview, setShowCodePreview] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [viewMode, setViewMode] = useState<'output' | 'compare'>('output');
+  const [splitPct, setSplitPct] = useState<number>(50);
+  const [zoomed, setZoomed] = useState<boolean>(false);
+  const [probe, setProbe] = useState<ProbeValues | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const previewBoxRef = useRef<HTMLDivElement>(null);
 
   const meta = selectedNode ? NODE_CATALOG_MAP[selectedNode.type] : null;
-  const pythonCode = generatePythonOpenCVCode(nodes, edges);
+  const pythonCode = useMemo(() => generatePythonOpenCVCode(nodes, edges), [nodes, edges]);
+  const canCompare = Boolean(selectedResult?.inputPreviewDataUrl);
+  const activeCompare = viewMode === 'compare' && canCompare;
 
   const handleCopyCode = async () => {
     try {
@@ -69,20 +139,98 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleProbeMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!selectedResult?.imageData || !previewBoxRef.current) return;
+    const rect = previewBoxRef.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const imgW = selectedResult.width;
+    const imgH = selectedResult.height;
+
+    // Compute rendered image rectangle inside object-contain box
+    const boxRatio = rect.width / rect.height;
+    const imgRatio = imgW / imgH;
+    let drawW = rect.width;
+    let drawH = rect.height;
+    let offX = 0;
+    let offY = 0;
+
+    if (imgRatio > boxRatio) {
+      drawH = rect.width / imgRatio;
+      offY = (rect.height - drawH) / 2;
+    } else {
+      drawW = rect.height * imgRatio;
+      offX = (rect.width - drawW) / 2;
+    }
+
+    const relX = e.clientX - rect.left - offX;
+    const relY = e.clientY - rect.top - offY;
+    if (relX < 0 || relY < 0 || relX > drawW || relY > drawH) {
+      setProbe(null);
+      return;
+    }
+
+    const px = Math.min(imgW - 1, Math.max(0, Math.floor((relX / drawW) * imgW)));
+    const py = Math.min(imgH - 1, Math.max(0, Math.floor((relY / drawH) * imgH)));
+    const idx = (py * imgW + px) * 4;
+    const d = selectedResult.imageData.data;
+    setProbe(rgbToProbe(px, py, d[idx], d[idx + 1], d[idx + 2]));
+  };
+
   return (
     <aside
-      className={`w-[292px] sm:w-[304px] bg-[#121417] border-l border-[#22262C] flex flex-col h-full shrink-0 ${className}`}
+      className={`w-[292px] sm:w-[308px] bg-[#121417] border-l border-[#22262C] flex flex-col h-full shrink-0 ${className}`}
     >
       {/* Top Half: Selected Node Parameters */}
       <div className="flex-1 overflow-y-auto px-4 pt-3.5 pb-4">
         {selectedNode && meta ? (
           <div>
-            <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-[#F3F4F6]">
-              {meta.title}
-            </h2>
-            <div className="text-[11px] font-mono-tabular text-[#7D8590] mt-0.5 mb-4">
-              {selectedNode.type}
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-[#F3F4F6] truncate">
+                  {meta.title}
+                </h2>
+                <div className="text-[11px] font-mono-tabular text-[#7D8590] mt-0.5 mb-3.5">
+                  {selectedNode.type}
+                </div>
+              </div>
+
+              {selectedNode.type !== 'load_image' && selectedNode.type !== 'webcam_input' && (
+                <button
+                  type="button"
+                  onClick={() => onToggleBypass(selectedNode.id)}
+                  title="Bypass / Mute node (Shortcut: M)"
+                  className={`px-2 py-1 rounded-[5px] border text-[10.5px] font-medium flex items-center gap-1 shrink-0 cursor-pointer transition-colors ${
+                    selectedNode.bypassed
+                      ? 'bg-[#2A1D0A] border-[#B45309] text-[#FBBF24]'
+                      : 'bg-[#171A1F] border-[#262B34] text-[#9CA3AF] hover:text-white'
+                  }`}
+                >
+                  <Power className="w-3 h-3" />
+                  <span>{selectedNode.bypassed ? 'Bypassed' : 'Active'}</span>
+                </button>
+              )}
             </div>
+
+            {/* Visual Corner / ROI Picker Launcher for Warp Perspective & Crop ROI */}
+            {(selectedNode.type === 'warp_perspective' || selectedNode.type === 'crop_roi') && (
+              <button
+                type="button"
+                onClick={() => onOpenGeometryEditor(selectedNode.id)}
+                className="w-full mb-3.5 flex items-center justify-center gap-2 px-3 py-2 rounded-[6px] bg-[#162324] hover:bg-[#1C2E30] border border-[#2DD4BF]/50 text-[#5EEAD4] font-medium text-[12px] transition-colors cursor-pointer"
+              >
+                {selectedNode.type === 'warp_perspective' ? (
+                  <Move className="w-3.5 h-3.5" />
+                ) : (
+                  <Crop className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {selectedNode.type === 'warp_perspective'
+                    ? 'Pick Perspective Corners Visually'
+                    : 'Pick ROI Box Visually'}
+                </span>
+              </button>
+            )}
 
             <div className="space-y-3.5">
               {meta.params.length === 0 && (
@@ -93,6 +241,34 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
 
               {meta.params.map((param) => {
                 const val = selectedNode.params[param.key] ?? param.defaultValue;
+
+                if (param.type === 'webcam_control') {
+                  return (
+                    <div key={param.key} className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={onToggleWebcam}
+                        className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-[6px] font-semibold text-[12.5px] transition-colors cursor-pointer ${
+                          webcamActive
+                            ? 'bg-[#F43F5E] hover:bg-[#FB7185] text-white'
+                            : 'bg-[#389E82] hover:bg-[#4ADE80] text-[#0B0D10]'
+                        }`}
+                      >
+                        {webcamActive ? <VideoOff className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
+                        <span>{webcamActive ? 'Stop Live Camera' : 'Start Live Camera'}</span>
+                      </button>
+                      <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#8B949E] px-1">
+                        <span>{webcamActive ? 'Stream: ACTIVE' : 'Stream: STANDBY'}</span>
+                        {webcamActive && <span className="text-[#4ADE80]">{webcamFps} FPS</span>}
+                      </div>
+                      {webcamError && (
+                        <p className="text-[11px] text-[#FCA5A5] bg-[#251316] border border-[#7F1D1D] rounded-[6px] px-2.5 py-2">
+                          {webcamError}
+                        </p>
+                      )}
+                    </div>
+                  );
+                }
 
                 if (param.type === 'select') {
                   return (
@@ -326,9 +502,8 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
         )}
       </div>
 
-      {/* Bottom Half: Code | Results Tabs matching Mockup */}
+      {/* Bottom Half: Code | Results Tabs */}
       <div className="border-t border-[#22262C] bg-[#121417] flex flex-col shrink-0">
-        {/* Tab Bar with Emerald Active Indicator */}
         <div className="grid grid-cols-2 border-b border-[#22262C] select-none">
           <button
             type="button"
@@ -355,7 +530,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
         </div>
 
         {/* Tab Body */}
-        <div className="p-4 min-h-[195px] max-h-[260px] overflow-y-auto">
+        <div className="p-3.5 min-h-[215px] max-h-[300px] overflow-y-auto">
           {bottomTab === 'code' ? (
             <div className="space-y-3">
               <div>
@@ -399,22 +574,156 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
               )}
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {selectedResult ? (
                 <>
-                  <div className="rounded-[6px] overflow-hidden border border-[#242932] bg-checkerboard flex items-center justify-center h-32">
-                    <img
-                      src={selectedResult.previewDataUrl}
-                      alt="Selected node output"
-                      className="max-w-full max-h-full object-contain"
-                    />
+                  {/* Mode & Zoom Toolbar */}
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center rounded-[5px] bg-[#0B0D10] border border-[#242932] p-0.5 text-[10.5px]">
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('output')}
+                        className={`px-2 py-0.5 rounded-[4px] cursor-pointer transition-colors ${
+                          !activeCompare ? 'bg-[#222731] text-white font-medium' : 'text-[#8B949E]'
+                        }`}
+                      >
+                        Output
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!canCompare}
+                        onClick={() => setViewMode('compare')}
+                        title={canCompare ? 'Before/After Comparison Slider' : 'Connect an upstream node to compare'}
+                        className={`px-2 py-0.5 rounded-[4px] flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-35 ${
+                          activeCompare ? 'bg-[#389E82] text-[#0B0D10] font-semibold' : 'text-[#8B949E]'
+                        }`}
+                      >
+                        <SplitSquareHorizontal className="w-3 h-3" />
+                        <span>Compare</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setZoomed((z) => !z)}
+                        title="Toggle 2x Zoom"
+                        className={`px-2 py-0.5 rounded-[5px] border text-[10.5px] font-mono-tabular flex items-center gap-1 cursor-pointer ${
+                          zoomed
+                            ? 'bg-[#222731] border-[#F58220]/70 text-[#F58220]'
+                            : 'bg-[#16191E] border-[#262B34] text-[#9CA3AF] hover:text-white'
+                        }`}
+                      >
+                        <ZoomIn className="w-3 h-3" />
+                        <span>{zoomed ? '2×' : 'Fit'}</span>
+                      </button>
+                      {samplesCount > 1 && (
+                        <button
+                          type="button"
+                          onClick={onOpenBatchModal}
+                          title="Open Multi-Seed Batch Grid"
+                          className="px-2 py-0.5 rounded-[5px] border border-[#262B34] bg-[#16191E] hover:bg-[#222730] text-[#FDBA74] text-[10.5px] flex items-center gap-1 cursor-pointer"
+                        >
+                          <Grid className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#8B949E]">
-                    <span>
-                      {selectedResult.width}×{selectedResult.height} · {selectedResult.channels}ch
-                    </span>
-                    <span className="text-[#4ADE80]">{selectedResult.durationMs.toFixed(1)}ms</span>
+
+                  {/* Interactive Output / Compare Viewport */}
+                  <div
+                    ref={previewBoxRef}
+                    onMouseMove={activeCompare ? undefined : handleProbeMove}
+                    onMouseLeave={() => setProbe(null)}
+                    className={`rounded-[6px] overflow-auto border border-[#242932] bg-checkerboard relative flex items-center justify-center h-36 ${
+                      activeCompare ? 'select-none' : 'cursor-crosshair'
+                    }`}
+                  >
+                    {activeCompare && selectedResult.inputPreviewDataUrl ? (
+                      <div className="relative w-full h-full flex items-center justify-center">
+                        <img
+                          src={selectedResult.previewDataUrl}
+                          alt="After output"
+                          className="w-full h-full object-contain pointer-events-none"
+                        />
+                        <div
+                          className="absolute inset-0 overflow-hidden pointer-events-none"
+                          style={{ clipPath: `inset(0 ${100 - splitPct}% 0 0)` }}
+                        >
+                          <img
+                            src={selectedResult.inputPreviewDataUrl}
+                            alt="Before input"
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                        <div
+                          className="absolute top-0 bottom-0 w-[2px] bg-[#F58220] pointer-events-none shadow"
+                          style={{ left: `${splitPct}%` }}
+                        >
+                          <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-7 rounded bg-[#F58220] text-[#0B0D10] text-[9px] font-bold flex items-center justify-center shadow">
+                            ↔
+                          </div>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={splitPct}
+                          onChange={(e) => setSplitPct(Number(e.target.value))}
+                          aria-label="Comparison split slider"
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize"
+                        />
+                        <span className="absolute top-1.5 left-1.5 px-1 py-0.5 rounded bg-[#0B0D10]/80 text-[8.5px] font-mono-tabular text-[#9CA3AF] pointer-events-none">
+                          BEFORE
+                        </span>
+                        <span className="absolute top-1.5 right-1.5 px-1 py-0.5 rounded bg-[#0B0D10]/80 text-[8.5px] font-mono-tabular text-[#4ADE80] pointer-events-none">
+                          AFTER
+                        </span>
+                      </div>
+                    ) : (
+                      <img
+                        src={selectedResult.previewDataUrl}
+                        alt="Selected node output"
+                        className={
+                          zoomed
+                            ? 'w-[180%] max-w-none h-auto object-contain'
+                            : 'max-w-full max-h-full object-contain'
+                        }
+                      />
+                    )}
                   </div>
+
+                  {/* Live Hover Pixel Probe Readout */}
+                  {probe ? (
+                    <div className="rounded-[5px] bg-[#0B0D10] border border-[#22262C] px-2 py-1 text-[10px] font-mono-tabular text-[#C9D1D9] space-y-0.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#38BDF8]">
+                          XY({probe.x},{probe.y})
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className="inline-block w-2.5 h-2.5 rounded-xs border border-white/25"
+                            style={{ backgroundColor: `rgb(${probe.r},${probe.g},${probe.b})` }}
+                          />
+                          RGB({probe.r},{probe.g},{probe.b})
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-[#8B949E]">
+                        <span>HSV({probe.hCv},{probe.sCv},{probe.vCv})</span>
+                        <span>YCrCb({probe.yCbCrY},{probe.cr},{probe.cb})</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#8B949E]">
+                      <span>
+                        {selectedResult.width}×{selectedResult.height} · {selectedResult.channels}ch
+                      </span>
+                      <span className="text-[#4ADE80]">
+                        {selectedResult.bypassed ? 'BYPASSED' : `${selectedResult.durationMs.toFixed(1)}ms`}
+                      </span>
+                    </div>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => selectedNode && onExportNodeImage(selectedNode.id)}

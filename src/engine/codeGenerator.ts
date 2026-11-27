@@ -57,9 +57,20 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
       return found ? varName(found.source) : fallback;
     };
 
-    switch (node.type) {
+    if (node.bypassed) {
+      lines.push(`    # [BYPASSED] ${node.type}`);
+      lines.push(`    ${outVar} = ${getIn('image', getIn('a', getIn('mask')))}`);
+    } else {
+      switch (node.type) {
       case 'load_image':
         lines.push(`    ${outVar} = cv2.imread(image_path)  # sample: ${node.params.sampleId ?? 'lena'}`);
+        break;
+      case 'webcam_input':
+        lines.push(
+          `    _cap_${id} = cv2.VideoCapture(0)`,
+          `    _, ${outVar} = _cap_${id}.read()`,
+          `    _cap_${id}.release()`
+        );
         break;
       case 'clahe':
       case 'albu_clahe': {
@@ -184,6 +195,68 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
           `    _pts_${id} = cv2.goodFeaturesToTrack(cv2.cvtColor(${getIn('image')}, cv2.COLOR_BGR2GRAY), ${node.params.maxCorners ?? 45}, 0.01, 10)`
         );
         break;
+      case 'hough_lines': {
+        const src = getIn('image');
+        const bgr = hexToBgrTuple(String(node.params.lineColor || '#38BDF8'));
+        lines.push(
+          `    _edges_${id} = cv2.Canny(cv2.cvtColor(${src}, cv2.COLOR_BGR2GRAY), ${node.params.cannyLow ?? 50}, ${node.params.cannyHigh ?? 150})`,
+          `    _lines_${id} = cv2.HoughLinesP(_edges_${id}, 1, np.pi / 180, ${node.params.threshold ?? 40}, minLineLength=${node.params.minLineLength ?? 28}, maxLineGap=${node.params.maxLineGap ?? 10})`,
+          `    ${outVar} = ${src}.copy()`,
+          `    if _lines_${id} is not None:`,
+          `        for _l in _lines_${id}:`,
+          `            x1, y1, x2, y2 = _l[0]`,
+          `            cv2.line(${outVar}, (x1, y1), (x2, y2), ${bgr}, 2, cv2.LINE_AA)`
+        );
+        break;
+      }
+      case 'hough_circles': {
+        const src = getIn('image');
+        const bgr = hexToBgrTuple(String(node.params.circleColor || '#F58220'));
+        lines.push(
+          `    _gray_${id} = cv2.GaussianBlur(cv2.cvtColor(${src}, cv2.COLOR_BGR2GRAY), (5, 5), 1.4)`,
+          `    _circ_${id} = cv2.HoughCircles(_gray_${id}, cv2.HOUGH_GRADIENT, 1, ${node.params.minDist ?? 24}, param1=${node.params.param1 ?? 100}, param2=${node.params.param2 ?? 28}, minRadius=${node.params.minRadius ?? 6}, maxRadius=${node.params.maxRadius ?? 80})`,
+          `    ${outVar} = ${src}.copy()`,
+          `    if _circ_${id} is not None:`,
+          `        for (cx, cy, r) in np.uint16(np.around(_circ_${id}[0])):`,
+          `            cv2.circle(${outVar}, (cx, cy), r, ${bgr}, 2, cv2.LINE_AA)`
+        );
+        break;
+      }
+      case 'orb_features': {
+        const src = getIn('image');
+        const bgr = hexToBgrTuple(String(node.params.markerColor || '#10B981'));
+        lines.push(
+          `    _orb_${id} = cv2.ORB_create(nfeatures=${node.params.maxFeatures ?? 250})`,
+          `    _kps_${id} = _orb_${id}.detect(cv2.cvtColor(${src}, cv2.COLOR_BGR2GRAY), None)`,
+          `    ${outVar} = cv2.drawKeypoints(${src}, _kps_${id}, None, color=${bgr}, flags=${node.params.drawRich !== false ? 'cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS' : '0'})`
+        );
+        break;
+      }
+      case 'dft_spectrum': {
+        const src = getIn('image');
+        lines.push(
+          `    _f_${id} = np.float32(cv2.cvtColor(${src}, cv2.COLOR_BGR2GRAY))`,
+          `    _dft_${id} = cv2.dft(_f_${id}, flags=cv2.DFT_COMPLEX_OUTPUT)`,
+          `    _shift_${id} = np.fft.fftshift(_dft_${id})`,
+          `    _mag_${id} = 20 * np.log(cv2.magnitude(_shift_${id}[:, :, 0], _shift_${id}[:, :, 1]) + 1)`,
+          `    ${outVar} = cv2.normalize(_mag_${id}, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)`
+        );
+        break;
+      }
+      case 'grabcut': {
+        const src = getIn('image');
+        const m = Number(node.params.marginPct ?? 10) / 100;
+        lines.push(
+          `    _h_${id}, _w_${id} = ${src}.shape[:2]`,
+          `    _mask_${id} = np.zeros((_h_${id}, _w_${id}), np.uint8)`,
+          `    _bgd_${id}, _fgd_${id} = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)`,
+          `    _rect_${id} = (int(_w_${id}*${m}), int(_h_${id}*${m}), int(_w_${id}*${(1 - 2 * m).toFixed(2)}), int(_h_${id}*${(1 - 2 * m).toFixed(2)}))`,
+          `    cv2.grabCut(${src}, _mask_${id}, _rect_${id}, _bgd_${id}, _fgd_${id}, ${node.params.iterations ?? 2}, cv2.GC_INIT_WITH_RECT)`,
+          `    _fg_mask_${id} = np.where((_mask_${id} == 2) | (_mask_${id} == 0), 0, 1).astype('uint8')`,
+          `    ${outVar} = ${src} * _fg_mask_${id}[:, :, np.newaxis]`
+        );
+        break;
+      }
       case 'canny':
         lines.push(`    ${outVar} = cv2.Canny(${getIn('image')}, ${node.params.threshold1 ?? 60}, ${node.params.threshold2 ?? 150})`);
         break;
@@ -381,6 +454,7 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
       }
       default:
         lines.push(`    ${outVar} = ${getIn('image')}`);
+      }
     }
 
     lastVar = outVar;
