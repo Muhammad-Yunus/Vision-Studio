@@ -7,6 +7,7 @@ import { InspectorSidebar } from './components/InspectorSidebar';
 import { NodeLibrarySidebar } from './components/NodeLibrarySidebar';
 import { OSDEditorModal } from './components/OSDEditorModal';
 import { PipelineCanvas } from './components/PipelineCanvas';
+import { ResultPreviewModal } from './components/ResultPreviewModal';
 import { TopBar } from './components/TopBar';
 import { DEFAULT_OSD_ELEMENTS, NODE_CATALOG_MAP } from './data/nodeCatalog';
 import { PIPELINE_TEMPLATES } from './data/templates';
@@ -175,6 +176,7 @@ export default function App() {
   const [batchModalOpen, setBatchModalOpen] = useState<boolean>(false);
   const [batchResults, setBatchResults] = useState<BatchSampleResult[]>([]);
   const [batchLoading, setBatchLoading] = useState<boolean>(false);
+  const [resultModalOpen, setResultModalOpen] = useState<boolean>(false);
 
   // Live Webcam Stream State
   const [webcamActive, setWebcamActive] = useState<boolean>(false);
@@ -905,6 +907,7 @@ export default function App() {
           onToggleWebcam={handleToggleWebcam}
           samplesCount={samples}
           onOpenBatchModal={handleOpenBatchModal}
+          onExpandResult={() => setResultModalOpen(true)}
           className="hidden lg:flex"
         />
 
@@ -938,6 +941,10 @@ export default function App() {
               onToggleWebcam={handleToggleWebcam}
               samplesCount={samples}
               onOpenBatchModal={handleOpenBatchModal}
+              onExpandResult={() => {
+                setRightDrawerOpen(false);
+                setResultModalOpen(true);
+              }}
               className="flex shadow-2xl"
             />
           </div>
@@ -1016,6 +1023,16 @@ export default function App() {
         isLoading={batchLoading}
         onClose={() => setBatchModalOpen(false)}
         onAdoptSeed={(chosenSeed) => handleSeedChange(chosenSeed)}
+      />
+
+      {/* Large / Resizable Result Preview Popup Modal */}
+      <ResultPreviewModal
+        open={resultModalOpen}
+        nodeTitle={selectedNode ? NODE_CATALOG_MAP[selectedNode.type]?.title || selectedNode.type : 'Result'}
+        nodeType={selectedNode?.type || ''}
+        result={selectedNodeId ? results[selectedNodeId] ?? null : null}
+        onClose={() => setResultModalOpen(false)}
+        onExportImage={() => handleExportNodeImage()}
       />
 
       {/* AI Prompt Pipeline Generator Modal */}

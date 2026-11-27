@@ -8,6 +8,7 @@ import {
   Download,
   Grid,
   Layers,
+  Maximize2,
   Move,
   Paintbrush,
   Power,
@@ -42,6 +43,7 @@ interface InspectorSidebarProps {
   onToggleWebcam: () => void;
   samplesCount: number;
   onOpenBatchModal: () => void;
+  onExpandResult: () => void;
   className?: string;
 }
 
@@ -101,6 +103,7 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
   onToggleWebcam,
   samplesCount,
   onOpenBatchModal,
+  onExpandResult,
   className = '',
 }) => {
   const [bottomTab, setBottomTab] = useState<'code' | 'results'>('code');
@@ -627,6 +630,15 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                           <Grid className="w-3 h-3" />
                         </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={onExpandResult}
+                        title="Open Large Result Popup Window"
+                        className="px-2 py-0.5 rounded-[5px] border border-[#262B34] bg-[#16191E] hover:bg-[#222730] text-[#E6EDF3] hover:text-[#F58220] text-[10.5px] flex items-center gap-1 cursor-pointer"
+                      >
+                        <Maximize2 className="w-3 h-3" />
+                        <span>Pop</span>
+                      </button>
                     </div>
                   </div>
 
@@ -635,6 +647,8 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     ref={previewBoxRef}
                     onMouseMove={activeCompare ? undefined : handleProbeMove}
                     onMouseLeave={() => setProbe(null)}
+                    onDoubleClick={onExpandResult}
+                    title="Double-click to open large result popup"
                     className={`rounded-[6px] overflow-auto border border-[#242932] bg-checkerboard relative flex items-center justify-center h-36 ${
                       activeCompare ? 'select-none' : 'cursor-crosshair'
                     }`}
