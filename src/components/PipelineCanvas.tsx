@@ -636,6 +636,13 @@ export const PipelineCanvas: React.FC<PipelineCanvasProps> = ({
                   </div>
                 )}
 
+                {/* Detector Count Overlay (bottom-left inside thumbnail) */}
+                {res && !node.bypassed && res.metrics?.ownedByNode && typeof res.metrics.count === 'number' && (
+                  <div className="absolute bottom-1 left-1 px-1.5 py-[1px] rounded-[3px] bg-[#0B0D10]/90 border border-[#389E82]/70 text-[#5EEAD4] text-[8.5px] font-mono-tabular leading-tight pointer-events-none">
+                    CNT {res.metrics.count}
+                  </div>
+                )}
+
                 {/* Direct OSD Canvas Editor Quick Button on OSD Nodes */}
                 {node.type === 'osd_canvas' && (
                   <button

@@ -104,6 +104,14 @@ export interface PipelineEdge {
   targetHandle: string;
 }
 
+export interface NodeMetrics {
+  count?: number;
+  sourceNode?: string;
+  unit?: string;
+  totalArea?: number;
+  ownedByNode?: boolean;
+}
+
 export interface NodeExecutionResult {
   nodeId: string;
   previewDataUrl: string;
@@ -116,6 +124,7 @@ export interface NodeExecutionResult {
   imageData?: ImageData;
   inputPreviewDataUrl?: string;
   inputImageData?: ImageData;
+  metrics?: NodeMetrics;
 }
 
 export interface BatchSampleResult {

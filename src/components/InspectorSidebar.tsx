@@ -434,20 +434,44 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                 }
 
                 if (param.type === 'text' && param.key !== 'customDataUrl') {
+                  const isOsdText = selectedNode.type === 'osd_telemetry';
                   return (
-                    <label key={param.key} className="block space-y-1.5">
-                      <span className="text-[11.5px] font-medium text-[#9CA3AF] block">
-                        {param.label}
-                      </span>
-                      <input
-                        type="text"
-                        value={String(val)}
-                        onChange={(e) =>
-                          onUpdateParam(selectedNode.id, param.key, e.target.value)
-                        }
-                        className="w-full rounded-[6px] bg-[#0F1115] border border-[#262B34] focus:border-[#389E82] px-3 py-2 text-[12.5px] font-mono-tabular text-[#F3F4F6] outline-none"
-                      />
-                    </label>
+                    <div key={param.key} className="space-y-1.5">
+                      <label className="block space-y-1.5">
+                        <span className="text-[11.5px] font-medium text-[#9CA3AF] block">
+                          {param.label}
+                        </span>
+                        <input
+                          type="text"
+                          value={String(val)}
+                          onChange={(e) =>
+                            onUpdateParam(selectedNode.id, param.key, e.target.value)
+                          }
+                          className="w-full rounded-[6px] bg-[#0F1115] border border-[#262B34] focus:border-[#389E82] px-3 py-2 text-[12.5px] font-mono-tabular text-[#F3F4F6] outline-none"
+                        />
+                      </label>
+                      {isOsdText && (
+                        <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                          <span className="text-[10px] text-[#7D8590]">Bind:</span>
+                          {['{count}', '{unit}', '{source}', '{area}'].map((tok) => (
+                            <button
+                              key={tok}
+                              type="button"
+                              onClick={() =>
+                                onUpdateParam(
+                                  selectedNode.id,
+                                  param.key,
+                                  `${String(val)}${String(val).endsWith(' ') || !String(val) ? '' : ' '}${tok}`
+                                )
+                              }
+                              className="px-1.5 py-0.5 rounded bg-[#161B22] hover:bg-[#1F2731] border border-[#28303D] text-[10px] font-mono-tabular text-[#5EEAD4] cursor-pointer"
+                            >
+                              +{tok}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   );
                 }
 
@@ -731,6 +755,12 @@ export const InspectorSidebar: React.FC<InspectorSidebarProps> = ({
                     <div className="flex items-center justify-between text-[11px] font-mono-tabular text-[#8B949E]">
                       <span>
                         {selectedResult.width}×{selectedResult.height} · {selectedResult.channels}ch
+                        {typeof selectedResult.metrics?.count === 'number' && (
+                          <span className="text-[#5EEAD4]">
+                            {' '}
+                            · {selectedResult.metrics.count} {selectedResult.metrics.unit || 'cnt'}
+                          </span>
+                        )}
                       </span>
                       <span className="text-[#4ADE80]">
                         {selectedResult.bypassed ? 'BYPASSED' : `${selectedResult.durationMs.toFixed(1)}ms`}

@@ -17,13 +17,19 @@ import {
   Type,
   X,
 } from 'lucide-react';
-import { ensureOpenCVReady, isOpenCVWasmReady, renderOSDElementsToImageData } from '../engine/cvEngine';
-import { OSDElement, OSDElementKind } from '../types/pipeline';
+import {
+  ensureOpenCVReady,
+  isOpenCVWasmReady,
+  renderOSDElementsToImageData,
+  resolveOsdText,
+} from '../engine/cvEngine';
+import { NodeMetrics, OSDElement, OSDElementKind } from '../types/pipeline';
 
 interface OSDEditorModalProps {
   open: boolean;
   nodeTitle: string;
   baseImageData: ImageData;
+  metrics?: NodeMetrics;
   initialElements: OSDElement[];
   initialOpacity: number;
   initialGridBurnIn: boolean;
@@ -131,6 +137,7 @@ export const OSDEditorModal: React.FC<OSDEditorModalProps> = ({
   open,
   nodeTitle,
   baseImageData,
+  metrics,
   initialElements,
   initialOpacity,
   initialGridBurnIn,
@@ -170,7 +177,13 @@ export const OSDEditorModal: React.FC<OSDEditorModalProps> = ({
     let cancelled = false;
     const draw = () => {
       if (cancelled || !canvasRef.current) return;
-      const rendered = renderOSDElementsToImageData(baseImageData, elements, globalOpacity, showGridBurnIn);
+      const rendered = renderOSDElementsToImageData(
+        baseImageData,
+        elements,
+        globalOpacity,
+        showGridBurnIn,
+        metrics
+      );
       const canvas = canvasRef.current;
       canvas.width = rendered.width;
       canvas.height = rendered.height;
@@ -185,7 +198,7 @@ export const OSDEditorModal: React.FC<OSDEditorModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, baseImageData, elements, globalOpacity, showGridBurnIn]);
+  }, [open, baseImageData, elements, globalOpacity, showGridBurnIn, metrics]);
 
   useEffect(() => {
     if (!dragState) return;
@@ -661,15 +674,39 @@ export const OSDEditorModal: React.FC<OSDEditorModalProps> = ({
                   </label>
 
                   {(selectedEl.kind === 'text' || selectedEl.kind === 'bbox_label') && (
-                    <label className="block space-y-1">
-                      <span className="text-[11px] text-[#9CA3AF]">OSD Text (cv.putText)</span>
-                      <input
-                        type="text"
-                        value={selectedEl.text || ''}
-                        onChange={(e) => updateSelected({ text: e.target.value })}
-                        className="w-full rounded bg-[#0F1115] border border-[#262B34] px-2.5 py-1.5 text-[12px] font-mono-tabular text-white outline-none focus:border-[#389E82]"
-                      />
-                    </label>
+                    <div className="space-y-1.5">
+                      <label className="block space-y-1">
+                        <span className="text-[11px] text-[#9CA3AF]">OSD Text (cv.putText)</span>
+                        <input
+                          type="text"
+                          value={selectedEl.text || ''}
+                          onChange={(e) => updateSelected({ text: e.target.value })}
+                          className="w-full rounded bg-[#0F1115] border border-[#262B34] px-2.5 py-1.5 text-[12px] font-mono-tabular text-white outline-none focus:border-[#389E82]"
+                        />
+                      </label>
+                      <div className="flex flex-wrap items-center gap-1">
+                        {['{count}', '{unit}', '{source}', '{width}x{height}'].map((tok) => (
+                          <button
+                            key={tok}
+                            type="button"
+                            onClick={() => {
+                              const cur = selectedEl.text || '';
+                              updateSelected({
+                                text: `${cur}${cur && !cur.endsWith(' ') ? ' ' : ''}${tok}`,
+                              });
+                            }}
+                            className="px-1.5 py-0.5 rounded bg-[#161B22] hover:bg-[#202731] border border-[#28303D] text-[10px] font-mono-tabular text-[#5EEAD4] cursor-pointer"
+                          >
+                            +{tok}
+                          </button>
+                        ))}
+                      </div>
+                      {selectedEl.text && /\{(count|unit|source|area|width|height)\}/i.test(selectedEl.text) && (
+                        <div className="px-2 py-1 rounded bg-[#0B0D10] border border-[#1E242D] text-[10.5px] font-mono-tabular text-[#86EFAC] truncate">
+                          Live: {resolveOsdText(selectedEl.text, baseImageData.width, baseImageData.height, metrics)}
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   <div className="space-y-1.5">

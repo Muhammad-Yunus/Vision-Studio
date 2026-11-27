@@ -1068,8 +1068,11 @@ export const NODE_CATALOG: NodeCatalogItem[] = [
     type: 'osd_canvas',
     title: 'OSD Canvas',
     category: 'osd',
-    description: 'Drag & drop OpenCV On-Screen Display (rect, circle, arrow, text, HUD).',
-    inputs: [{ id: 'image', label: 'IMAGE' }],
+    description: 'Drag & drop OpenCV On-Screen Display. Supports {count}, {unit}, {width}, {height} tokens.',
+    inputs: [
+      { id: 'image', label: 'IMAGE' },
+      { id: 'metrics', label: 'DATA', optional: true },
+    ],
     outputs: [{ id: 'image', label: 'OSD OUT' }],
     params: [
       { key: 'elements', label: 'OSD Layers', type: 'osd_layers', defaultValue: DEFAULT_OSD_ELEMENTS },
@@ -1081,11 +1084,14 @@ export const NODE_CATALOG: NodeCatalogItem[] = [
     type: 'osd_telemetry',
     title: 'OSD Telemetry HUD',
     category: 'osd',
-    description: 'Render OpenCV frame telemetry banner & crosshair overlay.',
-    inputs: [{ id: 'image', label: 'IMAGE' }],
+    description: 'Render OpenCV frame telemetry banner & crosshair. Supports {count}, {unit}, {source} tokens.',
+    inputs: [
+      { id: 'image', label: 'IMAGE' },
+      { id: 'metrics', label: 'DATA', optional: true },
+    ],
     outputs: [{ id: 'image', label: 'OSD OUT' }],
     params: [
-      { key: 'label', label: 'HUD Title', type: 'text', defaultValue: 'VISION STUDIO // WASM' },
+      { key: 'label', label: 'HUD Title', type: 'text', defaultValue: 'COUNT: {count} {unit}' },
       { key: 'accentColor', label: 'HUD Color', type: 'color', defaultValue: '#22C55E' },
       { key: 'showCrosshair', label: 'Center Crosshair', type: 'boolean', defaultValue: true },
       { key: 'fontScale', label: 'Font Scale', type: 'range', defaultValue: 0.5, min: 0.3, max: 1.4, step: 0.05 },

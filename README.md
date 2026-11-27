@@ -27,7 +27,7 @@ Build, debug, and export real-time computer vision DAG pipelines directly in the
   <img src="./docs/Screenshot_2026-11-27_132605.png" alt="Vision Studio — PCB Defect & OSD Annotation Pipeline" width="100%" />
 </p>
 
-<!-- 3 columns x 2 rows gallery grid for the remaining 5 screenshots -->
+<!-- 3 columns x 3 rows gallery grid -->
 <table>
   <tr>
     <td width="33.3%" align="center" valign="top">
@@ -57,17 +57,27 @@ Build, debug, and export real-time computer vision DAG pipelines directly in the
       <br />
       <sub><strong>OSD Drag &amp; Drop Editor (Portrait)</strong><br />Reticle, Vector Arrow, BBox &amp; Telemetry HUD</sub>
     </td>
-    <td width="33.3%" align="center" valign="middle">
-      <strong>Core Capabilities</strong>
-      <br /><br />
-      <sub>
-        40+ OpenCV Processing Nodes<br />
-        <code>cv2.warpAffine</code> &amp; <code>cv2.warpPerspective</code><br />
-        Interactive Drag &amp; Drop OSD Canvas<br />
-        Topological DAG Cache &amp; Execution Log<br />
-        Standalone Python <code>cv2</code> Script Export<br />
-        Prompt-to-Pipeline via OpenAI-Compatible API
-      </sub>
+    <td width="33.3%" align="center" valign="top">
+      <img src="./docs/Screenshot_2026-11-27_154832.png" alt="Contour Counter and OSD Token Binding" width="100%" />
+      <br />
+      <sub><strong>Counters &amp; OSD <code>{count}</code> Binding</strong><br />Find Contours (<code>CNT 6</code>) wired to OSD Canvas &amp; Telemetry HUD</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="33.3%" align="center" valign="top">
+      <img src="./docs/Screenshot_2026-11-27_155357.png" alt="Hough Lines Detection and Compare Slider" width="100%" />
+      <br />
+      <sub><strong>Hough Lines (P) &amp; Compare Slider</strong><br />Canny edge lane extraction with <code>CNT 3</code> &amp; Before/After split</sub>
+    </td>
+    <td width="33.3%" align="center" valign="top">
+      <img src="./docs/Screenshot_2026-11-27_155040.png" alt="Haar Face Detection Pipeline" width="100%" />
+      <br />
+      <sub><strong>Haar Face Detection (<code>CNT 1</code>)</strong><br />Real-time OpenCV face bounding box, score &amp; Before/After view</sub>
+    </td>
+    <td width="33.3%" align="center" valign="top">
+      <img src="./docs/Screenshot_2026-11-27_154937.png" alt="Gaussian Noise and Bilateral Denoising" width="100%" />
+      <br />
+      <sub><strong>Noise &amp; Bilateral Filtering</strong><br />Seeded Gaussian sensor noise followed by edge-preserving smoothing</sub>
     </td>
   </tr>
 </table>
@@ -84,18 +94,26 @@ vision-studio/
 │   ├── Screenshot_2026-11-27_132856.png
 │   ├── Screenshot_2026-11-27_132346.png
 │   ├── Screenshot_2026-11-27_133327.png
-│   └── Screenshot_2026-11-27_132846.png
+│   ├── Screenshot_2026-11-27_132846.png
+│   ├── Screenshot_2026-11-27_154832.png
+│   ├── Screenshot_2026-11-27_154937.png
+│   ├── Screenshot_2026-11-27_155040.png
+│   └── Screenshot_2026-11-27_155357.png
 ├── public/
+│   ├── opencv/                          # Local OpenCV.js WASM bundle
 │   └── samples/
 │       └── lena.jpg                     # Default portrait sample image
 ├── src/
 │   ├── components/
-│   │   ├── AIGenerateModal.tsx          # Prompt-to-pipeline modal UI
+│   │   ├── AIGenerateModal.tsx          # Prompt + reference image AI pipeline modal
+│   │   ├── BatchSamplesModal.tsx        # Multi-seed batch comparison grid modal
 │   │   ├── ExecutionLog.tsx             # Bottom execution & cache timing log
-│   │   ├── InspectorSidebar.tsx         # Node parameter editor, Python Code & Results tabs
+│   │   ├── GeometryEditorModal.tsx      # Interactive Perspective & Crop ROI visual picker
+│   │   ├── InspectorSidebar.tsx         # Node params, Python Code, Compare & Pixel Probe
 │   │   ├── NodeLibrarySidebar.tsx       # Searchable, categorized OpenCV node palette
 │   │   ├── OSDEditorModal.tsx           # Interactive drag & drop OpenCV OSD canvas editor
 │   │   ├── PipelineCanvas.tsx           # Pan/zoom node graph, ports, smooth-step edges & MiniMap
+│   │   ├── ResultPreviewModal.tsx       # Resizable Compact/Large/Full result inspection popup
 │   │   └── TopBar.tsx                   # Studio header, Seed/Samples, Run, OSD/AI, Templates & Export
 │   ├── data/
 │   │   ├── nodeCatalog.ts               # 40+ OpenCV node specs, ports, defaults & categories

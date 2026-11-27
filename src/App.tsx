@@ -793,6 +793,19 @@ export default function App() {
     [osdEditorNodeId, getUpstreamBaseImage]
   );
 
+  const osdBaseMetrics = useMemo(() => {
+    if (!osdEditorNodeId) return undefined;
+    const metricsEdge = edges.find((e) => e.target === osdEditorNodeId && e.targetHandle === 'metrics');
+    if (metricsEdge && results[metricsEdge.source]?.metrics) {
+      return results[metricsEdge.source].metrics;
+    }
+    const imageEdge = edges.find((e) => e.target === osdEditorNodeId);
+    if (imageEdge && results[imageEdge.source]?.metrics) {
+      return results[imageEdge.source].metrics;
+    }
+    return undefined;
+  }, [osdEditorNodeId, edges, results]);
+
   const geometryBaseImageData = useMemo(
     () => getUpstreamBaseImage(geometryEditorNodeId),
     [geometryEditorNodeId, getUpstreamBaseImage]
@@ -957,6 +970,7 @@ export default function App() {
           open={Boolean(osdEditorNode)}
           nodeTitle={NODE_CATALOG_MAP[osdEditorNode.type]?.title || 'OSD Canvas'}
           baseImageData={osdBaseImageData}
+          metrics={osdBaseMetrics}
           initialElements={
             Array.isArray(osdEditorNode.params.elements)
               ? (osdEditorNode.params.elements as OSDElement[])

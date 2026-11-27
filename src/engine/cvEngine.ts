@@ -3,6 +3,7 @@ import {
   BatchSampleResult,
   ExecutionLogEntry,
   NodeExecutionResult,
+  NodeMetrics,
   OSDElement,
   PipelineEdge,
   PipelineNode,
@@ -820,7 +821,7 @@ function applyFindContours(
   minArea = 40,
   drawBoxes = true,
   color = '#22C55E'
-): ImageData {
+): { imageData: ImageData; metrics: NodeMetrics } {
   const { width, height } = maskImg;
   const gray = imageDataToGrayMat(cv, maskImg);
   const bin = new cv.Mat();
@@ -839,10 +840,14 @@ function applyFindContours(
     cv.threshold(gray, bin, 127, 255, cv.THRESH_BINARY);
     cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     let drawnBoxes = 0;
+    let matchedCount = 0;
+    let totalArea = 0;
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
       const area = cv.contourArea(cnt);
       if (area >= minArea) {
+        matchedCount++;
+        totalArea += area;
         cv.drawContours(canvasMat, contours, i, new cv.Scalar(cr, cg, cb), 2, cv.LINE_AA);
         if (drawBoxes && drawnBoxes < 40) {
           const rect = cv.boundingRect(cnt);
@@ -859,7 +864,16 @@ function applyFindContours(
       }
       cnt.delete();
     }
-    return matToImageData(cv, canvasMat);
+    return {
+      imageData: matToImageData(cv, canvasMat),
+      metrics: {
+        count: matchedCount,
+        sourceNode: 'find_contours',
+        unit: 'contours',
+        totalArea: Math.round(totalArea),
+        ownedByNode: true,
+      },
+    };
   } finally {
     gray.delete();
     bin.delete();
@@ -875,7 +889,7 @@ function applyCornerDetect(
   maxCorners = 45,
   threshold = 35,
   color = '#F58220'
-): ImageData {
+): { imageData: ImageData; metrics: NodeMetrics } {
   const rgb = imageDataToRgbMat(cv, src);
   const gray = new cv.Mat();
   const gftt = new cv.GFTTDetector();
@@ -888,13 +902,22 @@ function applyCornerDetect(
     gftt.setMinDistance(10);
     gftt.detect(gray, keypoints);
 
-    for (let i = 0; i < keypoints.size(); i++) {
+    const cornerCount = keypoints.size();
+    for (let i = 0; i < cornerCount; i++) {
       const kp = keypoints.get(i);
       const pt = new cv.Point(Math.round(kp.pt.x), Math.round(kp.pt.y));
       cv.circle(rgb, pt, 4, new cv.Scalar(11, 13, 16), -1, cv.LINE_AA);
       cv.circle(rgb, pt, 3, new cv.Scalar(cr, cg, cb), -1, cv.LINE_AA);
     }
-    return matToImageData(cv, rgb);
+    return {
+      imageData: matToImageData(cv, rgb),
+      metrics: {
+        count: cornerCount,
+        sourceNode: 'corner_detect',
+        unit: 'corners',
+        ownedByNode: true,
+      },
+    };
   } finally {
     rgb.delete();
     gray.delete();
@@ -1279,7 +1302,7 @@ async function applyFaceDetectHaar(
   minNeighbors = 4,
   privacyMode = 'bbox',
   boxColor = '#F43F5E'
-): Promise<ImageData> {
+): Promise<{ imageData: ImageData; metrics: NodeMetrics }> {
   const rgb = imageDataToRgbMat(cv, src);
   const [cr, cg, cb] = hexToRgb(boxColor);
   try {
@@ -1341,7 +1364,15 @@ async function applyFaceDetectHaar(
       );
     }
 
-    return matToImageData(cv, rgb);
+    return {
+      imageData: matToImageData(cv, rgb),
+      metrics: {
+        count: faces.length,
+        sourceNode: 'face_detect_haar',
+        unit: 'faces',
+        ownedByNode: true,
+      },
+    };
   } finally {
     rgb.delete();
   }
@@ -1353,7 +1384,7 @@ async function applyFaceLandmarks(
   showMesh = true,
   pointRadius = 3,
   landmarkColor = '#38BDF8'
-): Promise<ImageData> {
+): Promise<{ imageData: ImageData; metrics: NodeMetrics }> {
   const rgb = imageDataToRgbMat(cv, src);
   const [cr, cg, cb] = hexToRgb(landmarkColor);
   try {
@@ -1392,7 +1423,15 @@ async function applyFaceLandmarks(
         cv.circle(rgb, center, rad, new cv.Scalar(cr, cg, cb), -1, cv.LINE_AA);
       }
     }
-    return matToImageData(cv, rgb);
+    return {
+      imageData: matToImageData(cv, rgb),
+      metrics: {
+        count: faces.length,
+        sourceNode: 'face_landmarks',
+        unit: 'faces',
+        ownedByNode: true,
+      },
+    };
   } finally {
     rgb.delete();
   }
@@ -1817,7 +1856,7 @@ function applyHoughLinesP(
   maxLineGap = 10,
   overlayOnSource = true,
   lineColor = '#38BDF8'
-): ImageData {
+): { imageData: ImageData; metrics: NodeMetrics } {
   const rgb = imageDataToRgbMat(cv, src);
   const gray = new cv.Mat();
   const edges = new cv.Mat();
@@ -1839,7 +1878,8 @@ function applyHoughLinesP(
       Math.max(1, maxLineGap)
     );
     const data = lines.data32S;
-    const count = Math.min(250, Math.floor(data.length / 4));
+    const totalLines = Math.floor(data.length / 4);
+    const count = Math.min(250, totalLines);
     for (let i = 0; i < count; i++) {
       const off = i * 4;
       cv.line(
@@ -1851,7 +1891,15 @@ function applyHoughLinesP(
         cv.LINE_AA
       );
     }
-    return matToImageData(cv, outMat);
+    return {
+      imageData: matToImageData(cv, outMat),
+      metrics: {
+        count: totalLines,
+        sourceNode: 'hough_lines',
+        unit: 'lines',
+        ownedByNode: true,
+      },
+    };
   } finally {
     rgb.delete();
     gray.delete();
@@ -1870,7 +1918,7 @@ function applyHoughCircles(
   minRadius = 6,
   maxRadius = 80,
   circleColor = '#F58220'
-): ImageData {
+): { imageData: ImageData; metrics: NodeMetrics } {
   const rgb = imageDataToRgbMat(cv, src);
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
@@ -1891,7 +1939,8 @@ function applyHoughCircles(
       Math.max(Math.round(minRadius) + 2, Math.round(maxRadius))
     );
     const data = circles.data32F;
-    const count = Math.min(80, Math.floor(data.length / 3));
+    const totalCircles = Math.floor(data.length / 3);
+    const count = Math.min(80, totalCircles);
     for (let i = 0; i < count; i++) {
       const off = i * 3;
       const cx = Math.round(data[off]);
@@ -1900,7 +1949,15 @@ function applyHoughCircles(
       cv.circle(rgb, new cv.Point(cx, cy), r, new cv.Scalar(cr, cg, cb), 2, cv.LINE_AA);
       cv.circle(rgb, new cv.Point(cx, cy), 2, new cv.Scalar(34, 197, 94), -1, cv.LINE_AA);
     }
-    return matToImageData(cv, rgb);
+    return {
+      imageData: matToImageData(cv, rgb),
+      metrics: {
+        count: totalCircles,
+        sourceNode: 'hough_circles',
+        unit: 'circles',
+        ownedByNode: true,
+      },
+    };
   } finally {
     rgb.delete();
     gray.delete();
@@ -1915,7 +1972,7 @@ function applyOrbFeatures(
   maxFeatures = 250,
   drawRich = true,
   markerColor = '#10B981'
-): ImageData {
+): { imageData: ImageData; metrics: NodeMetrics } {
   const rgb = imageDataToRgbMat(cv, src);
   const gray = new cv.Mat();
   const orb = new cv.ORB(Math.max(10, Math.round(maxFeatures)));
@@ -1926,6 +1983,7 @@ function applyOrbFeatures(
   try {
     cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
     orb.detect(gray, kps, emptyMask);
+    const kpCount = kps.size();
     const col = new cv.Scalar(cr, cg, cb, 255);
     if (cv.drawKeypoints && typeof cv.DrawMatchesFlags_DRAW_RICH_KEYPOINTS === 'number') {
       const flag = drawRich
@@ -1933,7 +1991,7 @@ function applyOrbFeatures(
         : (cv.DrawMatchesFlags_DEFAULT ?? 0);
       cv.drawKeypoints(rgb, kps, outRgb, col, flag);
     } else {
-      for (let i = 0; i < kps.size(); i++) {
+      for (let i = 0; i < kpCount; i++) {
         const kp = kps.get(i);
         const cx = Math.round(kp.pt.x);
         const cy = Math.round(kp.pt.y);
@@ -1952,7 +2010,15 @@ function applyOrbFeatures(
         }
       }
     }
-    return matToImageData(cv, outRgb);
+    return {
+      imageData: matToImageData(cv, outRgb),
+      metrics: {
+        count: kpCount,
+        sourceNode: 'orb_features',
+        unit: 'keypoints',
+        ownedByNode: true,
+      },
+    };
   } finally {
     rgb.delete();
     gray.delete();
@@ -2219,11 +2285,27 @@ export function previewCropWithOpenCV(
 // OPENCV OSD DRAWING (100% window.cv)
 // ============================================================================
 
+export function resolveOsdText(
+  template: string,
+  width: number,
+  height: number,
+  metrics?: NodeMetrics
+): string {
+  return template
+    .replace(/\{count\}/gi, String(metrics?.count ?? 0))
+    .replace(/\{unit\}/gi, String(metrics?.unit ?? 'items'))
+    .replace(/\{source\}/gi, String(metrics?.sourceNode ?? 'frame'))
+    .replace(/\{area\}/gi, String(metrics?.totalArea ?? 0))
+    .replace(/\{width\}/gi, String(width))
+    .replace(/\{height\}/gi, String(height));
+}
+
 export function renderOSDElementsToImageData(
   baseImg: ImageData,
   elements: OSDElement[],
   globalOpacity = 1.0,
-  showGridBurnIn = false
+  showGridBurnIn = false,
+  metrics?: NodeMetrics
 ): ImageData {
   const cv = getCv();
   const w = baseImg.width;
@@ -2268,7 +2350,7 @@ export function renderOSDElementsToImageData(
           Math.max(1, Math.round(el.thickness || 2)),
           cv.LINE_AA
         );
-        const label = el.text || 'OBJECT';
+        const label = resolveOsdText(el.text || 'OBJECT', w, h, metrics);
         const fScale = el.fontScale ?? 0.5;
         const tagH = Math.max(18, Math.round(22 * fScale * 1.4));
         cv.rectangle(
@@ -2324,7 +2406,7 @@ export function renderOSDElementsToImageData(
         );
       } else if (el.kind === 'text') {
         const fScale = el.fontScale ?? 0.55;
-        const txt = el.text || 'OSD TEXT';
+        const txt = resolveOsdText(el.text || 'OSD TEXT', w, h, metrics);
         const tw = Math.round(txt.length * 14 * fScale);
         const th = Math.round(26 * fScale);
         cv.rectangle(
@@ -2503,7 +2585,7 @@ export async function executePipeline(options: {
         inputMap[edge.targetHandle] = sourceRes.imageData;
         inputSourceIdMap[edge.targetHandle] = edge.source;
         inputSigParts.push(
-          `${edge.targetHandle}:${edge.source}:${sourceRes.durationMs}:${sourceRes.previewDataUrl.length}`
+          `${edge.targetHandle}:${edge.source}:${sourceRes.durationMs}:${sourceRes.previewDataUrl.length}:${sourceRes.metrics?.count ?? ''}`
         );
       }
     }
@@ -2523,6 +2605,12 @@ export async function executePipeline(options: {
       Object.values(inputMap).find(Boolean) ||
       defaultLena;
 
+    const metricsSourceId = inputSourceIdMap.metrics || primaryInputSourceId;
+    const incomingMetrics = metricsSourceId ? results[metricsSourceId]?.metrics : undefined;
+    const inheritedMetrics: NodeMetrics | undefined = incomingMetrics
+      ? { ...incomingMetrics, ownedByNode: false }
+      : undefined;
+
     const isLiveWebcam = node.type === 'webcam_input' && Boolean(webcamFrameData);
 
     const signature = JSON.stringify({
@@ -2531,6 +2619,7 @@ export async function executePipeline(options: {
       bypassed: isBypassed,
       seed: meta?.isRandom ? seed : 0,
       inputs: inputSigParts.sort(),
+      incomingMetrics: inheritedMetrics ?? null,
     });
 
     const cached = !skipCache && !isLiveWebcam ? executionCache.get(node.id) : undefined;
@@ -2554,6 +2643,7 @@ export async function executePipeline(options: {
 
     const t0 = performance.now();
     let outImage: ImageData;
+    let nodeMetrics: NodeMetrics | undefined;
 
     if (isBypassed && node.type !== 'load_image' && node.type !== 'webcam_input') {
       outImage = cloneImageDataViaCv(cv, primaryInput);
@@ -2699,8 +2789,8 @@ export async function executePipeline(options: {
             String(node.params.type || 'binary')
           );
           break;
-        case 'find_contours':
-          outImage = applyFindContours(
+        case 'find_contours': {
+          const out = applyFindContours(
             cv,
             inputMap.mask || primaryInput,
             inputMap.canvas,
@@ -2708,18 +2798,24 @@ export async function executePipeline(options: {
             node.params.drawBoxes !== false,
             String(node.params.color || '#22C55E')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
-        case 'corner_detect':
-          outImage = applyCornerDetect(
+        }
+        case 'corner_detect': {
+          const out = applyCornerDetect(
             cv,
             primaryInput,
             Number(node.params.maxCorners ?? 45),
             Number(node.params.threshold ?? 35),
             String(node.params.color || '#F58220')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
-        case 'hough_lines':
-          outImage = applyHoughLinesP(
+        }
+        case 'hough_lines': {
+          const out = applyHoughLinesP(
             cv,
             primaryInput,
             Number(node.params.cannyLow ?? 50),
@@ -2730,9 +2826,12 @@ export async function executePipeline(options: {
             node.params.overlayOnSource !== false,
             String(node.params.lineColor || '#38BDF8')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
-        case 'hough_circles':
-          outImage = applyHoughCircles(
+        }
+        case 'hough_circles': {
+          const out = applyHoughCircles(
             cv,
             primaryInput,
             Number(node.params.minDist ?? 24),
@@ -2742,16 +2841,22 @@ export async function executePipeline(options: {
             Number(node.params.maxRadius ?? 80),
             String(node.params.circleColor || '#F58220')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
-        case 'orb_features':
-          outImage = applyOrbFeatures(
+        }
+        case 'orb_features': {
+          const out = applyOrbFeatures(
             cv,
             primaryInput,
             Number(node.params.maxFeatures ?? 250),
             node.params.drawRich !== false,
             String(node.params.markerColor || '#10B981')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
+        }
         case 'dft_spectrum':
           outImage = applyDftSpectrum(
             cv,
@@ -2863,8 +2968,8 @@ export async function executePipeline(options: {
         case 'warp_perspective':
           outImage = applyWarpPerspective(cv, primaryInput, node.params);
           break;
-        case 'face_detect_haar':
-          outImage = await applyFaceDetectHaar(
+        case 'face_detect_haar': {
+          const out = await applyFaceDetectHaar(
             cv,
             primaryInput,
             Number(node.params.scaleFactor ?? 1.1),
@@ -2872,16 +2977,22 @@ export async function executePipeline(options: {
             String(node.params.privacyMode || 'bbox'),
             String(node.params.boxColor || '#F43F5E')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
-        case 'face_landmarks':
-          outImage = await applyFaceLandmarks(
+        }
+        case 'face_landmarks': {
+          const out = await applyFaceLandmarks(
             cv,
             primaryInput,
             node.params.showMesh !== false,
             Number(node.params.pointRadius ?? 3),
             String(node.params.landmarkColor || '#38BDF8')
           );
+          outImage = out.imageData;
+          nodeMetrics = out.metrics;
           break;
+        }
         case 'face_skin_mask':
           outImage = applySkinMask(
             cv,
@@ -2934,13 +3045,15 @@ export async function executePipeline(options: {
             primaryInput,
             elements,
             Number(node.params.globalOpacity ?? 1),
-            Boolean(node.params.showGridBurnIn)
+            Boolean(node.params.showGridBurnIn),
+            inheritedMetrics
           );
           break;
         }
         case 'osd_telemetry': {
           const hudColor = String(node.params.accentColor || '#22C55E');
-          const title = String(node.params.label || 'VISION STUDIO // WASM');
+          const rawTitle = String(node.params.label || 'COUNT: {count} {unit}');
+          const title = resolveOsdText(rawTitle, primaryInput.width, primaryInput.height, inheritedMetrics);
           const fScale = Number(node.params.fontScale ?? 0.5);
           const els: OSDElement[] = [
             {
@@ -2976,7 +3089,7 @@ export async function executePipeline(options: {
               lineType: 'LINE_AA',
             });
           }
-          outImage = renderOSDElementsToImageData(primaryInput, els, 1, true);
+          outImage = renderOSDElementsToImageData(primaryInput, els, 1, true, inheritedMetrics);
           break;
         }
         case 'osd_grid_ruler': {
@@ -3044,6 +3157,7 @@ export async function executePipeline(options: {
     const durationMs = isBypassed ? 0.2 : Math.max(0.5, performance.now() - t0);
     totalMs += durationMs;
 
+    const finalMetrics = nodeMetrics ?? inheritedMetrics;
     const result: NodeExecutionResult = {
       nodeId: node.id,
       previewDataUrl: imageDataToDataUrl(outImage),
@@ -3063,17 +3177,22 @@ export async function executePipeline(options: {
       imageData: outImage,
       inputPreviewDataUrl,
       inputImageData: primaryInputSourceId ? primaryInput : undefined,
+      metrics: finalMetrics,
     };
 
     if (!isLiveWebcam && !skipCache) {
       executionCache.set(node.id, { signature, result });
     }
     results[node.id] = result;
+    const countSuffix =
+      !isBypassed && nodeMetrics?.ownedByNode && typeof nodeMetrics.count === 'number'
+        ? ` · count: ${nodeMetrics.count} ${nodeMetrics.unit || ''}`
+        : '';
     logs.push({
       id: `${node.id}-done-${Date.now()}-${Math.random()}`,
       message: isBypassed
         ? `Bypassed ${opName} (pass-through)`
-        : `Finished ${opName} in ${durationMs.toFixed(1)}ms`,
+        : `Finished ${opName} in ${durationMs.toFixed(1)}ms${countSuffix}`,
       kind: isBypassed ? 'warn' : 'success',
       timestamp: Date.now(),
     });

@@ -182,10 +182,13 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
         break;
       case 'find_contours': {
         const bgr = hexToBgrTuple(String(node.params.color || '#22C55E'));
+        const minArea = Number(node.params.minArea ?? 40);
         lines.push(
           `    _cnts_${id}, _ = cv2.findContours(${getIn('mask')}, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)`,
+          `    _valid_cnts_${id} = [c for c in _cnts_${id} if cv2.contourArea(c) >= ${minArea}]`,
+          `    detected_count = len(_valid_cnts_${id})`,
           `    ${outVar} = np.zeros((*${getIn('mask')}.shape[:2], 3), dtype=np.uint8)`,
-          `    cv2.drawContours(${outVar}, _cnts_${id}, -1, ${bgr}, 1)`
+          `    cv2.drawContours(${outVar}, _valid_cnts_${id}, -1, ${bgr}, 2)`
         );
         break;
       }
@@ -414,7 +417,11 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
       case 'osd_canvas': {
         const src = getIn('image');
         const els = Array.isArray(node.params.elements) ? (node.params.elements as OSDElement[]) : [];
-        lines.push(`    ${outVar} = ${src}.copy()`, `    _h, _w = ${outVar}.shape[:2]`);
+        lines.push(
+          `    ${outVar} = ${src}.copy()`,
+          `    _h, _w = ${outVar}.shape[:2]`,
+          `    _cnt_val = locals().get('detected_count', 0)`
+        );
         for (const el of els) {
           if (!el.visible) continue;
           const bgr = hexToBgrTuple(el.color);
@@ -425,7 +432,7 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
             );
             if (el.kind === 'bbox_label' && el.text) {
               lines.push(
-                `    cv2.putText(${outVar}, ${JSON.stringify(el.text)}, (int(${el.x.toFixed(3)}*_w), int(${el.y.toFixed(3)}*_h) - 6), cv2.FONT_HERSHEY_SIMPLEX, ${el.fontScale ?? 0.55}, ${bgr}, 1, cv2.LINE_AA)`
+                `    cv2.putText(${outVar}, ${JSON.stringify(el.text)}.replace('{count}', str(_cnt_val)), (int(${el.x.toFixed(3)}*_w), int(${el.y.toFixed(3)}*_h) - 6), cv2.FONT_HERSHEY_SIMPLEX, ${el.fontScale ?? 0.55}, ${bgr}, 1, cv2.LINE_AA)`
               );
             }
           } else if (el.kind === 'circle') {
@@ -442,7 +449,7 @@ export function generatePythonOpenCVCode(nodes: PipelineNode[], edges: PipelineE
             );
           } else if (el.kind === 'text') {
             lines.push(
-              `    cv2.putText(${outVar}, ${JSON.stringify(el.text || 'OSD')}, (int(${el.x.toFixed(3)}*_w), int(${el.y.toFixed(3)}*_h) + 18), cv2.FONT_HERSHEY_SIMPLEX, ${el.fontScale ?? 0.5}, ${bgr}, ${th}, cv2.LINE_AA)`
+              `    cv2.putText(${outVar}, ${JSON.stringify(el.text || 'OSD')}.replace('{count}', str(_cnt_val)), (int(${el.x.toFixed(3)}*_w), int(${el.y.toFixed(3)}*_h) + 18), cv2.FONT_HERSHEY_SIMPLEX, ${el.fontScale ?? 0.5}, ${bgr}, ${th}, cv2.LINE_AA)`
             );
           } else if (el.kind === 'reticle') {
             lines.push(
